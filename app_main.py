@@ -873,12 +873,17 @@ async def ws_audio(ws: WebSocket):
 @app.websocket("/ws/camera")
 async def ws_camera_esp(ws: WebSocket):
     global esp32_camera_ws, blind_path_navigator, cross_street_navigator, cross_street_active, navigation_active, orchestrator
+    # 允许新连接替换旧连接（手机/ESP32 互切）
     if esp32_camera_ws is not None:
-        await ws.close(code=1013)
-        return
+        try:
+            await esp32_camera_ws.close(code=1000)
+        except Exception:
+            pass
+        esp32_camera_ws = None
+        print("[CAMERA] 旧连接已断开，切换到新连接")
     esp32_camera_ws = ws
     await ws.accept()
-    print("[CAMERA] ESP32 connected")
+    print("[CAMERA] 相机源已连接")
     
     # 【新增】初始化盲道导航器
     if blind_path_navigator is None and yolo_seg_model is not None:
