@@ -42,6 +42,10 @@ MUSIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music")
 # 音频文件映射（从 voice/map.zh-CN.json 动态加载）
 AUDIO_MAP = {}
 
+# TTS 配置
+USE_TTS_FOR_UNKNOWN = True  # 对于未知的语音，使用 TTS 合成
+TTS_ENGINE = os.getenv("TTS_ENGINE", "edge")  # edge 或 dashscope
+
 # 本地播放标志：True=直接播放, False=通过HTTP流
 USE_LOCAL_PLAYBACK = True
 
@@ -428,21 +432,82 @@ def play_voice_text(text: str):
             _last_voice_time = current_time
             return
 
-    # 针对“请向…平移/微调/转动”类词条，常见变体尝试
-    base = t.rstrip("。.!！?？")
+    # 针对”请向…平移/微调/转动”类词条，常见变体尝试
+    base = t.rstrip(“。.!！?？”)
     if base in AUDIO_MAP:
         play_audio_threadsafe(base)
         _last_voice_text = text
         _last_voice_time = current_time
         return
-    if base + "。" in AUDIO_MAP:
-        play_audio_threadsafe(base + "。")
+    if base + “。” in AUDIO_MAP:
+        play_audio_threadsafe(base + “。”)
+        _last_voice_text = text
+        _last_voice_time = current_time
+        return
+
+    # 【新增】TTS 合成：对于未知的语音，使用 TTS 合成
+    if USE_TTS_FOR_UNKNOWN and len(text) <= 200:  # 限制长度，避免过长文本
+        print(f”[AUDIO] 使用 TTS 合成语音: {text[:30]}...”)
+        asyncio.create_task(_synthesize_and_play(text))
         _last_voice_text = text
         _last_voice_time = current_time
         return
 
     # 未匹配则输出日志（便于调试）
-    print(f"[AUDIO] 未找到匹配语音: {text}")
+    print(f”[AUDIO] 未找到匹配语音: {text}”)
 
 # 兼容旧接口
 play_audio_on_esp32 = play_audio_threadsafe
+
+
+# ========== TTS 合成和播放 ==========
+async def _synthesize_and_play(text: str):
+    """
+    使用 TTS 合成语音并播放
+    :param text: 要合成的文本
+    """
+    try:
+        import audioop
+
+        if TTS_ENGINE == "edge":
+            # 使用 Edge-TTS
+            from edge_tts_client import synthesize_speech
+
+            pcm24 = await synthesize_speech(text, voice="zh-CN-XiaoxiaoNeural")
+
+            if pcm24:
+                # 24k → 8k
+                pcm8k, _ = audioop.ratecv(pcm24, 2, 1, 24000, 8000, None)
+                pcm8k = audioop.mul(pcm8k, 2, 0.60)
+                if pcm8k:
+                    await broadcast_pcm16_realtime(pcm8k)
+                    print(f"[TTS] Edge-TTS 播放完成，音频大小: {len(pcm8k)} 字节")
+                return
+
+        elif TTS_ENGINE == "dashscope":
+            # 使用 DashScope CosyVoice
+            from dashscope import audio as dash_audio
+
+            tts_result = dash_audio.speech.call(
+                model="cosyvoice-v1",
+                text=text,
+                sample_rate=24000,
+                format="wav",
+            )
+
+            if hasattr(tts_result, 'get_audio_data'):
+                pcm24 = tts_result.get_audio_data()
+                if pcm24:
+                    pcm8k, _ = audioop.ratecv(pcm24, 2, 1, 24000, 8000, None)
+                    pcm8k = audioop.mul(pcm8k, 2, 0.60)
+                    if pcm8k:
+                        await broadcast_pcm16_realtime(pcm8k)
+                        print(f"[TTS] DashScope TTS 播放完成，音频大小: {len(pcm8k)} 字节")
+                    return
+
+        print(f"[TTS] TTS 合成失败")
+
+    except Exception as e:
+        print(f"[TTS] TTS 异常: {e}")
+        import traceback
+        traceback.print_exc()
