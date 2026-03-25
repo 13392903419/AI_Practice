@@ -433,28 +433,28 @@ def play_voice_text(text: str):
             return
 
     # 针对”请向…平移/微调/转动”类词条，常见变体尝试
-    base = t.rstrip(“。.!！?？”)
+    base = t.rstrip(".！？")
     if base in AUDIO_MAP:
         play_audio_threadsafe(base)
         _last_voice_text = text
         _last_voice_time = current_time
         return
-    if base + “。” in AUDIO_MAP:
-        play_audio_threadsafe(base + “。”)
+    if base + "." in AUDIO_MAP:
+        play_audio_threadsafe(base +".")
         _last_voice_text = text
         _last_voice_time = current_time
         return
 
     # 【新增】TTS 合成：对于未知的语音，使用 TTS 合成
     if USE_TTS_FOR_UNKNOWN and len(text) <= 200:  # 限制长度，避免过长文本
-        print(f”[AUDIO] 使用 TTS 合成语音: {text[:30]}...”)
+        print(f"[AUDIO] 使用 TTS 合成语音: {text[:30]}...")
         asyncio.create_task(_synthesize_and_play(text))
         _last_voice_text = text
         _last_voice_time = current_time
         return
 
     # 未匹配则输出日志（便于调试）
-    print(f”[AUDIO] 未找到匹配语音: {text}”)
+    print(f"[AUDIO] 未找到匹配语音: {text}")
 
 # 兼容旧接口
 play_audio_on_esp32 = play_audio_threadsafe
