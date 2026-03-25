@@ -13,20 +13,36 @@ opencv-python==4.8.1.78
 numpy==1.24.3
 Pillow==10.1.0
 ultralytics==8.3.200
-torch==2.0.1
-torchvision==0.15.2
+
+# YOLO-E text model dependency (provides `import clip` without GitHub access)
+clip-anytorch==2.6.0
+
+# `clip-anytorch` imports `pkg_resources` which is provided by setuptools.
+# Pin to a known-good version that still ships `pkg_resources`.
+setuptools==68.2.2
+
+# PyTorch (建议由安装脚本按 CPU/GPU 安装，避免 CUDA 版本冲突)
+# - GPU (CUDA 11.8 / cu118): torch==2.0.1+cu118 torchvision==0.15.2+cu118
+# - CPU: torch==2.0.1 torchvision==0.15.2
 
 # MediaPipe (Hand Detection)
 mediapipe==0.10.8
 
 # Audio Processing
-pyaudio==0.2.14
+# PyAudio 在 Windows 上经常需要手动安装 wheel（见下方说明），因此不放在默认 requirements 里
+# pyaudio==0.2.14
 pydub==0.25.1
 pygame==2.5.2
+sounddevice==0.4.6
+websocket-client==1.6.4
+requests>=2.31.0
 
 # Aliyun DashScope SDK (ASR & Qwen-Omni)
 dashscope==1.14.1
 openai==1.3.5  # For DashScope compatibility mode
+
+# openai==1.3.5 与 httpx 0.28+ 存在不兼容（0.28 移除了 proxies 参数）
+httpx>=0.23.0,<0.28
 
 # Environment & Configuration
 python-dotenv==1.0.0

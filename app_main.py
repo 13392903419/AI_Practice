@@ -47,7 +47,7 @@ except Exception:
 # ---- DashScope ASR 基础 ----
 from dashscope import audio as dash_audio  # 若未安装，会在原项目里抛错提示
 
-API_KEY = os.getenv("DASHSCOPE_API_KEY", "sk-a9440db694924559ae4ebdc2023d2b9a")
+API_KEY = os.getenv("DASHSCOPE_API_KEY", "sk-82107b037f5847ee90deb81f6f976e0f")
 if not API_KEY:
     raise RuntimeError("未设置 DASHSCOPE_API_KEY")
 
@@ -79,6 +79,9 @@ from audio_player import initialize_audio_system, play_voice_text
 import sync_recorder
 import signal
 import atexit
+
+# ---- 音频测试一键启动器 ----
+import audio_test_launcher
 
 # ---- IMU UDP ----
 UDP_IP   = "0.0.0.0"
@@ -121,7 +124,7 @@ def load_navigation_models():
     global yolo_seg_model, obstacle_detector
 
     try:
-        seg_model_path = os.getenv("BLIND_PATH_MODEL", r"C:\Users\Administrator\Desktop\rebuild1002\model\yolo-seg.pt")
+        seg_model_path = os.getenv("BLIND_PATH_MODEL", r"D:\\AIProject\\Blind_for_Navigation\\model\\yolo-seg.pt")
         #print(f"[NAVIGATION] 尝试加载模型: {seg_model_path}")
 
         if os.path.exists(seg_model_path):
@@ -1280,8 +1283,20 @@ async def on_startup_init_audio():
             initialize_audio_system()
         except Exception as e:
             print(f"[AUDIO] 初始化失败: {e}")
-    
+
     threading.Thread(target=_init, daemon=True).start()
+
+@app.on_event("startup")
+async def on_startup_audio_tests():
+    """启动时自动启动音频测试（麦克风、扬声器）"""
+    def _start():
+        try:
+            audio_test_launcher.start_audio_tests(wait_for_server=False)
+        except Exception as e:
+            print(f"[AUDIO_TEST] 启动失败: {e}")
+
+    # 延迟 2 秒启动，确保服务器已就绪
+    threading.Timer(2.0, _start).start()
 
 @app.on_event("startup")
 async def on_startup():
@@ -1292,13 +1307,19 @@ async def on_startup():
 async def on_shutdown():
     """应用关闭时的清理工作"""
     print("[SHUTDOWN] 开始清理资源...")
-    
+
+    # 停止音频测试
+    try:
+        audio_test_launcher.stop_audio_tests()
+    except Exception as e:
+        print(f"[AUDIO_TEST] 停止失败: {e}")
+
     # 停止YOLO媒体处理
     stop_yolomedia()
-    
+
     # 停止音频和AI任务
     await hard_reset_audio("shutdown")
-    
+
     print("[SHUTDOWN] 资源清理完成")
 
 # app_main.py —— 在文件里已有的 @app.on_event("startup") 之后，再加一个新的 startup 钩子

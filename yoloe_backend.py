@@ -5,13 +5,20 @@ import os
 import cv2
 import numpy as np
 
+# 设置 Ultralytics 缓存目录到项目目录，避免权限问题
+_PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+_CACHE_DIR = os.path.join(_PROJECT_DIR, ".cache", "ultralytics")
+os.makedirs(_CACHE_DIR, exist_ok=True)
+os.environ["ULTRALYTICS_CACHE"] = _CACHE_DIR
+os.environ["HOME"] = _PROJECT_DIR  # 设置 HOME 环境变量
+
 # 兼容 YOLOE / YOLO
 try:
     from ultralytics import YOLOE as _MODEL
 except Exception:
     from ultralytics import YOLO as _MODEL
 
-DEFAULT_MODEL_PATH = os.getenv("YOLOE_MODEL_PATH", r"C:\Users\Administrator\Desktop\rebuild1002\model\yoloe-11l-seg.pt")
+DEFAULT_MODEL_PATH = os.getenv("YOLOE_MODEL_PATH", r"D:\\AIProject\\Blind_for_Navigation\\model\\yoloe-11l-seg.pt")
 TRACKER_CFG        = os.getenv("YOLO_TRACKER_YAML", "bytetrack.yaml")
 
 class YoloEBackend:

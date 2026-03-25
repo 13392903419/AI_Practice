@@ -18,9 +18,9 @@ if DEVICE.startswith("cuda") and not torch.cuda.is_available():
     DEVICE = "cpu"
 IS_CUDA = DEVICE.startswith("cuda")
 
-AMP_POLICY = os.getenv("AIGLASS_AMP", "bf16").lower()
+AMP_POLICY = os.getenv("AIGLASS_AMP", "off").lower()
 if AMP_POLICY not in ("bf16", "fp16", "off"):
-    AMP_POLICY = "bf16"
+    AMP_POLICY = "off"
 AMP_DTYPE = torch.bfloat16 if AMP_POLICY == "bf16" else (torch.float16 if AMP_POLICY == "fp16" else None)
 
 # --- GPU 并发限流 (从 blindpath 工作流迁移而来，保持一致) ---

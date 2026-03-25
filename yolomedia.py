@@ -92,8 +92,8 @@ except Exception as e:
     print(f"[DETECTOR] YOLOE backend not ready: {e}", flush=True)
 
 # ========= 路径参数（按需修改）=========
-YOLO_MODEL_PATH = r'C:\Users\Administrator\Desktop\rebuild1002\model\shoppingbest5.pt'
-HAND_TASK_PATH  = r"C:\Users\Administrator\Desktop\rebuild1002\model\hand_landmarker.task"
+YOLO_MODEL_PATH = r'D:\\AIProject\\Blind_for_Navigation\\model\\shoppingbest5.pt'
+HAND_TASK_PATH  = r"D:\\AIProject\\Blind_for_Navigation\\model\\hand_landmarker.task"
 
 # ========= 摄像头 =========
 CAM_INDEX = 0
@@ -783,7 +783,7 @@ def main(headless: bool = False, prompt_name: str = None, stop_event=None):
                 # 没取到帧就继续等（ESP32还没连上或暂时无新帧）
                 # [headless] 给出 1ms 让出调度，避免空转
                 if headless:
-                    cv2.waitKey(1)
+                    time.sleep(0.001)
                 continue
             
             # 每帧重置 UI 文字叠加到左下角
@@ -1544,9 +1544,9 @@ def main(headless: bool = False, prompt_name: str = None, stop_event=None):
                         else:
                             print("[LOCK] 当前帧未找到有效分割，请重试。")
             else:
-                # headless 下也调用一次 waitKey(1)，让 OpenCV 的计时器/回调得到机会，且避免 CPU 忙等
-                cv2.waitKey(1)
-                
+                # headless 下用 sleep 替代 waitKey，避免 GUI 依赖
+                time.sleep(0.001)
+
                 # 在 headless 模式下检查停止事件
                 if stop_event and stop_event.is_set():
                     print("[YOLOMEDIA] Received stop signal in headless mode")
