@@ -1380,8 +1380,20 @@ def get_camera_ws():
     return esp32_camera_ws
 
 if __name__ == "__main__":
+    import os, ssl as _ssl
+    _ssl_dir = os.path.join(os.path.dirname(__file__), "ssl")
+    _cert = os.path.join(_ssl_dir, "cert.pem")
+    _key  = os.path.join(_ssl_dir, "key.pem")
+    _ssl_kw = {}
+    if os.path.isfile(_cert) and os.path.isfile(_key):
+        _ssl_kw["ssl_certfile"] = _cert
+        _ssl_kw["ssl_keyfile"]  = _key
+        print(f"[STARTUP] HTTPS 已启用 (cert={_cert})")
+    else:
+        print("[STARTUP] 未找到 SSL 证书，使用 HTTP 模式")
     uvicorn.run(
         app, host="0.0.0.0", port=8081,
         log_level="warning", access_log=False,
-        loop="asyncio", workers=1, reload=False
+        loop="asyncio", workers=1, reload=False,
+        **_ssl_kw
     )
