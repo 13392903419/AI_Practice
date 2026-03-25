@@ -231,10 +231,10 @@ print("[NAVIGATION] 开始加载导航模型...")
 load_navigation_models()
 print(f"[NAVIGATION] 模型加载完成 - yolo_seg_model: {yolo_seg_model is not None}")
 
-# 【新增】启动同步录制
-print("[RECORDER] 启动同步录制系统...")
-sync_recorder.start_recording()
-print("[RECORDER] 录制系统已启动，将自动保存视频和音频")
+# 【已禁用】自动录制功能（如需启用，取消下方注释）
+# print("[RECORDER] 启动同步录制系统...")
+# sync_recorder.start_recording()
+# print("[RECORDER] 录制系统已启动，将自动保存视频和音频")
 
 # 【新增】注册退出处理器，确保Ctrl+C时保存录制文件
 def cleanup_on_exit():

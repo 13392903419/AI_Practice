@@ -1,5 +1,5 @@
 # audio_player.py
-# 处理预录音频文件的播放，通过ESP32扬声器输出
+# 处理预录音频文件的播放，通过电脑扬声器输出
 
 import os
 import wave
@@ -28,26 +28,22 @@ def _get_recorder():
             _recorder_imported = True  # 标记已尝试，避免重复
     return _sync_recorder
 
-# 兼容旧工程中的示例音频（保留）
-AUDIO_BASE_DIR = r"C:\Users\Administrator\Desktop\rebuild1002\music"
+# 旧路径保留作为备份（不使用）
+# AUDIO_BASE_DIR = r"D:AIProject\Blind_for_Navigation\music"
 
 # 新增：voice 目录与映射表
 # 使用脚本所在目录的 voice 文件夹，避免工作目录问题
 VOICE_DIR = os.getenv("VOICE_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "voice"))
 VOICE_MAP_FILE = os.path.join(VOICE_DIR, "map.zh-CN.json")
 
-# 音频文件映射（将合并 voice 映射）
-AUDIO_MAP = {
-    "检测到物体": os.path.join(AUDIO_BASE_DIR, "音频1.wav"),
-    "向上": os.path.join(AUDIO_BASE_DIR, "音频2.wav"),
-    "向下": os.path.join(AUDIO_BASE_DIR, "音频3.wav"),
-    "向左": os.path.join(AUDIO_BASE_DIR, "音频4.wav"),
-    "向右": os.path.join(AUDIO_BASE_DIR, "音频5.wav"),
-    "OK": os.path.join(AUDIO_BASE_DIR, "音频6.wav"),
-    "向前": os.path.join(AUDIO_BASE_DIR, "音频7.wav"),
-    "后退": os.path.join(AUDIO_BASE_DIR, "音频8.wav"),
-    "拿到物体": os.path.join(AUDIO_BASE_DIR, "音频9.wav"),
-}
+# MUSIC 目录（斑马线等特殊音频）
+MUSIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music")
+
+# 音频文件映射（从 voice/map.zh-CN.json 动态加载）
+AUDIO_MAP = {}
+
+# 本地播放标志：True=直接播放, False=通过HTTP流
+USE_LOCAL_PLAYBACK = True
 
 # 音频缓存，避免重复读取
 _audio_cache = {}
@@ -110,26 +106,55 @@ def load_wav_file(filepath):
         return None
 
 def _merge_voice_map():
-    """读取 voice/map.zh-CN.json 并合并到 AUDIO_MAP"""
+    """读取 voice/map.zh-CN.json 并合并到 AUDIO_MAP，同时扫描 music 目录"""
     try:
         if not os.path.exists(VOICE_MAP_FILE):
             print(f"[AUDIO] 未找到映射文件: {VOICE_MAP_FILE}")
             return
+
         with open(VOICE_MAP_FILE, "r", encoding="utf-8") as f:
             m = json.load(f)
+
         added = 0
         for text, info in (m or {}).items():
             files = (info or {}).get("files") or []
             if not files:
                 continue
             fname = files[0]
-            fpath = os.path.join(VOICE_DIR, fname)
+
+            # 处理相对路径 ../music/
+            if fname.startswith("../music/"):
+                fpath = os.path.join(MUSIC_DIR, os.path.basename(fname))
+            else:
+                fpath = os.path.join(VOICE_DIR, fname)
+
             if os.path.exists(fpath):
                 AUDIO_MAP[text] = fpath
                 added += 1
             else:
                 print(f"[AUDIO] 映射文件缺失: {fpath}")
-        print(f"[AUDIO] 已合并 voice 映射 {added} 条")
+
+        print(f"[AUDIO] 已加载 voice 映射 {added} 条")
+
+        # 扫描 music 目录，自动添加简短指令（向左、向右、向前等）
+        if os.path.exists(MUSIC_DIR):
+            music_added = 0
+            for fname in os.listdir(MUSIC_DIR):
+                if fname.endswith(('.wav', '.WAV')):
+                    # 提取文件名作为键（去掉扩展名）
+                    key = os.path.splitext(fname)[0]
+                    # 跳过 converted_ 前缀
+                    if key.startswith('converted_'):
+                        continue
+                    # 只添加简短指令（不超过5个字）
+                    if len(key) <= 5 and key not in AUDIO_MAP:
+                        fpath = os.path.join(MUSIC_DIR, fname)
+                        AUDIO_MAP[key] = fpath
+                        music_added += 1
+
+            if music_added > 0:
+                print(f"[AUDIO] 已补充 music 映射 {music_added} 条")
+
     except Exception as e:
         print(f"[AUDIO] 读取 voice 映射失败: {e}")
 
@@ -199,8 +224,41 @@ def _audio_worker():
     _worker_loop.run_until_complete(process_queue())
 
 async def _broadcast_audio_optimized(pcm_data: bytes):
-    """优化的音频广播：单次调用由底层按20ms节拍发送，移除重复节拍和Python层sleep"""
+    """优化的音频广播：本地直接播放（不依赖HTTP流）"""
     global _last_play_ts, _is_playing
+
+    # 【新增】本地播放模式：直接使用 sounddevice 播放
+    if USE_LOCAL_PLAYBACK:
+        try:
+            import sounddevice as sd
+            import numpy as np
+
+            with _playing_lock:
+                _is_playing = True
+
+            # 转换 PCM bytes 到 numpy array（int16）
+            audio_array = np.frombuffer(pcm_data, dtype=np.int16)
+
+            # 确保数据是连续的
+            if not audio_array.flags['C_CONTIGUOUS']:
+                audio_array = audio_array.copy()
+
+            # 直接播放（阻塞方式，确保播放完成）
+            sd.play(audio_array, samplerate=8000)
+            sd.wait()  # 等待播放完成
+
+            _last_play_ts = time.monotonic()
+            return
+        except ImportError:
+            print("[AUDIO] sounddevice 未安装，回退到 HTTP 流模式")
+            print("[AUDIO] 请运行: pip install sounddevice numpy")
+        except Exception as e:
+            print(f"[AUDIO] 本地播放失败: {e}，回退到 HTTP 流模式")
+        finally:
+            with _playing_lock:
+                _is_playing = False
+
+    # 【原始】HTTP 流模式（向后兼容）
     try:
         # 设置播放标志
         with _playing_lock:
@@ -217,15 +275,13 @@ async def _broadcast_audio_optimized(pcm_data: bytes):
 
         # 完整音频数据（包含静音）
         full_audio = lead_silence + pcm_data + tail_silence
-        
-        # 注意：录制在 broadcast_pcm16_realtime 中统一完成，避免重复
 
         # 单次调用交给底层 pacing（20ms节拍在 broadcast_pcm16_realtime 内部实现）
         await broadcast_pcm16_realtime(full_audio)
 
         _last_play_ts = time.monotonic()
     except Exception as e:
-        print(f"[AUDIO] 广播音频失败: {e}")
+        print(f"[AUDIO] HTTP流播放失败: {e}")
     finally:
         # 清除播放标志
         with _playing_lock:
