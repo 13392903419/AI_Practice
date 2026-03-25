@@ -4,6 +4,7 @@ import os, sys, time, json, asyncio, base64, audioop
 from typing import Any, Dict, Optional, Tuple, List, Callable, Set, Deque
 from collections import deque
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 import re
 # 在其它 import 之后加：
 from qwen_extractor import extract_english_label
@@ -117,6 +118,12 @@ orchestrator = None  # 新增
 # 【新增】omni对话状态标志
 omni_conversation_active = False  # 标记omni对话是否正在进行
 omni_previous_nav_state = None  # 保存omni激活前的导航状态，用于恢复
+
+# ====== 异步推理线程池（避免 YOLO/YOLOE 阻塞 WebSocket 接收） ======
+_infer_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="infer")
+_infer_busy = False          # 推理槽是否被占用
+_latest_result_img = None    # 最近一次推理输出的可视化图（供跳帧时复用）
+_latest_result_lock = threading.Lock()
 
 # 【新增】模型加载函数
 def load_navigation_models():
@@ -417,7 +424,7 @@ async def start_ai_with_text_custom(user_text: str):
     # 【修改】在导航模式和红绿灯检测模式下，只有特定词才进入omni对话
     if orchestrator:
         current_state = orchestrator.get_state()
-        # 如果在导航模式或红绿灯检测模式（非CHAT模式）
+        # 如果在导航模式或红绿灯检测模式（非CHAT模式, 非Item_Search模式）
         if current_state not in ["CHAT", "IDLE"]:
             # 检查是否是允许的对话触发词
             allowed_keywords = ["帮我看", "帮我看下", "帮我找", "找一下", "看看", "识别一下"]
@@ -425,7 +432,7 @@ async def start_ai_with_text_custom(user_text: str):
             
             # 检查是否是导航控制命令
             nav_control_keywords = ["开始过马路", "过马路结束", "开始导航", "盲道导航", "停止导航", "结束导航", 
-                                   "检测红绿灯", "看红绿灯", "停止检测", "停止红绿灯"]
+                                   "检测红绿灯", "看红绿灯", "停止检测", "停止红绿灯","拿到了","找到了"]
             is_nav_control = any(keyword in user_text for keyword in nav_control_keywords)
             
             # 如果既不是允许的查询，也不是导航控制命令，则丢弃
@@ -968,47 +975,82 @@ async def ws_camera_esp(ws: WebSocket):
                                     camera_viewers.discard(d)
                         continue  # 跳过后续的导航处理
                     
-                    out_img = bgr
-                    try:
-                        # 【新增】检查是否在红绿灯检测模式
-                        if current_state == "TRAFFIC_LIGHT_DETECTION":
-                            # 红绿灯检测模式：在主线程中直接处理，避免掉帧
-                            import trafficlight_detection
-                            result = trafficlight_detection.process_single_frame(bgr, ui_broadcast_callback=ui_broadcast_final)
-                            out_img = result['vis_image'] if result['vis_image'] is not None else bgr
-                        else:
-                            # 其他模式：正常的导航处理
-                            res = orchestrator.process_frame(bgr)
+                    # ====== 异步推理：不阻塞 WebSocket 接收 ======
+                    global _infer_busy, _latest_result_img
 
-                            # 语音引导（内部已节流）
-                            # 注：omni对话时已切换到CHAT模式，不会生成导航语音
-                            if res.guidance_text:
+                    if not _infer_busy:
+                        # GPU 空闲 → 提交本帧推理
+                        _infer_busy = True
+                        loop = asyncio.get_event_loop()
+
+                        def _sync_infer(frame, state):
+                            """在线程池中同步执行推理，结束后释放忙标志。"""
+                            global _infer_busy, _latest_result_img
+                            out = frame
+                            guidance = None
+                            try:
+                                if state == "TRAFFIC_LIGHT_DETECTION":
+                                    import trafficlight_detection
+                                    result = trafficlight_detection.process_single_frame(frame, ui_broadcast_callback=ui_broadcast_final)
+                                    out = result['vis_image'] if result['vis_image'] is not None else frame
+                                else:
+                                    res = orchestrator.process_frame(frame)
+                                    guidance = res.guidance_text
+                                    out = res.annotated_image if res.annotated_image is not None else frame
+                            except Exception as e:
+                                print(f"[INFER] 推理出错: {e}")
+                            finally:
+                                with _latest_result_lock:
+                                    _latest_result_img = out
+                                _infer_busy = False
+                            return out, guidance
+
+                        def _on_infer_done(fut):
+                            """推理完成的回调：播放语音并广播最新结果帧给前端。"""
+                            try:
+                                out_img, guidance = fut.result()
+                            except Exception:
+                                return
+                            if guidance:
                                 try:
-                                    # 先播放语音，再广播到UI
-                                    play_voice_text(res.guidance_text)
-                                    await ui_broadcast_final(f"[导航] {res.guidance_text}")
+                                    play_voice_text(guidance)
+                                    asyncio.run_coroutine_threadsafe(
+                                        ui_broadcast_final(f"[导航] {guidance}"), loop
+                                    )
+                                except Exception:
+                                    pass
+                            # 广播推理结果帧
+                            if camera_viewers and out_img is not None:
+                                try:
+                                    ok, enc = cv2.imencode(".jpg", out_img, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+                                    if ok:
+                                        jpeg_data = enc.tobytes()
+                                        for viewer_ws in list(camera_viewers):
+                                            asyncio.run_coroutine_threadsafe(
+                                                viewer_ws.send_bytes(jpeg_data), loop
+                                            )
                                 except Exception:
                                     pass
 
-                            # 输出图像
-                            out_img = res.annotated_image if res.annotated_image is not None else bgr
-                    except Exception as e:
-                        if frame_counter % 100 == 0:
-                            print(f"[NAV MASTER] 处理帧时出错: {e}")
-
-                    # 广播图像
-                    if camera_viewers and out_img is not None:
-                        ok, enc = cv2.imencode(".jpg", out_img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-                        if ok:
-                            jpeg_data = enc.tobytes()
-                            dead = []
-                            for viewer_ws in list(camera_viewers):
-                                try:
-                                    await viewer_ws.send_bytes(jpeg_data)
-                                except Exception:
-                                    dead.append(viewer_ws)
-                            for d in dead:
-                                camera_viewers.discard(d)
+                        fut = _infer_executor.submit(_sync_infer, bgr.copy(), current_state)
+                        fut.add_done_callback(_on_infer_done)
+                    else:
+                        # GPU 忙 → 跳过推理，把最新缓存的结果帧发给前端（保持流畅）
+                        with _latest_result_lock:
+                            cached = _latest_result_img
+                        show_img = cached if cached is not None else bgr
+                        if camera_viewers:
+                            ok, enc = cv2.imencode(".jpg", show_img, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+                            if ok:
+                                jpeg_data = enc.tobytes()
+                                dead = []
+                                for viewer_ws in list(camera_viewers):
+                                    try:
+                                        await viewer_ws.send_bytes(jpeg_data)
+                                    except Exception:
+                                        dead.append(viewer_ws)
+                                for d in dead:
+                                    camera_viewers.discard(d)
                     # 已托管，进入下一帧
                     continue
 

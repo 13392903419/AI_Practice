@@ -77,14 +77,19 @@ async def hard_reset_audio(reason: str = ""):
         print(f"[HARD-RESET] {reason}")
 
 async def broadcast_pcm16_realtime(pcm16: bytes):
-    """以 20ms 节拍把 pcm16 发送给所有仍存活的连接；队列满丢尾，保持实时。"""
+    """以 20ms 节拍把 pcm16 发送给所有仍存活的连接；无连接时回退到本地扬声器。"""
     # 【新增】录制音频（在分发之前整体录制，避免分片）
     try:
         import sync_recorder
         sync_recorder.record_audio(pcm16, text="[Omni对话]")
     except Exception:
         pass  # 静默失败，不影响播放
-    
+
+    # 无 /stream.wav 客户端时，回退到本地 sounddevice 播放
+    if not stream_clients:
+        await _local_playback(pcm16)
+        return
+
     loop = asyncio.get_event_loop()
     next_tick = loop.time()
     off = 0
@@ -115,6 +120,32 @@ async def broadcast_pcm16_realtime(pcm16: bytes):
         else:
             next_tick = now
         off += take
+
+
+# ===== 本地扬声器回退（无 /stream.wav 客户端时使用） =====
+_sd = None  # 懒加载 sounddevice
+_sd_checked = False
+
+async def _local_playback(pcm16: bytes):
+    """用 sounddevice 在本地电脑扬声器直接播放 8kHz PCM16 数据。"""
+    global _sd, _sd_checked
+    if not _sd_checked:
+        _sd_checked = True
+        try:
+            import sounddevice
+            _sd = sounddevice
+            print("[AUDIO] 本地回退播放已启用（sounddevice）")
+        except ImportError:
+            print("[AUDIO] sounddevice 未安装，无法本地播放。请运行: pip install sounddevice")
+    if _sd is None:
+        return
+    try:
+        import numpy as np
+        audio = np.frombuffer(pcm16, dtype=np.int16)
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: (_sd.play(audio, samplerate=STREAM_SR), _sd.wait()))
+    except Exception as e:
+        print(f"[AUDIO] 本地播放出错: {e}")
 
 # ===== FastAPI 路由注册器 =====
 def register_stream_route(app):
