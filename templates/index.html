@@ -290,54 +290,6 @@
     display: none;
   }
 
-  /* 手机模式面板 */
-  .mobile-toggle {
-    display: none; /* 默认隐藏，JS 检测到后显示 */
-    font-size: 13px;
-    padding: 6px 14px;
-    border-radius: 20px;
-    background: var(--accent-orange-soft);
-    border: 1px solid var(--accent-orange);
-    color: var(--accent-orange);
-    cursor: pointer;
-    font-weight: 500;
-    transition: all 0.2s;
-  }
-  .mobile-toggle:hover {
-    background: var(--accent-orange);
-    color: #fff;
-  }
-
-  .mobile-panel {
-    display: none;
-    flex-direction: column;
-    gap: 10px;
-    padding: 14px 16px;
-    background: var(--bg-cream);
-    border: 1px solid var(--border-warm);
-    border-radius: 12px;
-    margin-top: 8px;
-  }
-
-  .mobile-panel .row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
-  .mobile-panel .row-label {
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--text-secondary);
-    min-width: 60px;
-  }
-
-  .mobile-panel button {
-    font-size: 12px;
-    padding: 6px 12px;
-  }
-
   /* 响应式 */
   @media (max-width: 1100px) {
     .app {
@@ -370,6 +322,7 @@
   <section class="stage">
     <div class="canvas-wrap">
       <canvas id="canvas"></canvas>
+      <div id="canvasHint" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:16px;pointer-events:none;text-align:center;padding:20px">📷 点击右侧「手机模式」开启摄像头</div>
     </div>
 
     <!-- 右上角状态浮窗 -->
@@ -377,8 +330,6 @@
       <span id="camStatus" class="badge">Camera: 连接中…</span>
       <span id="asrStatus" class="badge">ASR: 连接中…</span>
       <span id="fps" class="badge">FPS: --</span>
-      <span id="mobileCamStatus" class="badge" style="display:none">手机摄像头: --</span>
-      <span id="mobileMicStatus" class="badge" style="display:none">手机麦克风: --</span>
     </div>
   </section>
 
@@ -390,24 +341,8 @@
         <span class="page-subtitle">智能语音交互</span>
       </div>
       <div class="controls">
-        <button class="mobile-toggle" id="mobileToggle">📱 手机模式</button>
         <button class="ghost" id="btnClear">清空记录</button>
         <button class="primary" id="btnReconnect">重新连接</button>
-      </div>
-    </div>
-
-    <!-- 手机模式控制面板 -->
-    <div class="mobile-panel" id="mobilePanel">
-      <div class="row">
-        <span class="row-label">摄像头</span>
-        <button id="btnStartCam" class="primary">开启</button>
-        <button id="btnStopCam" class="ghost">关闭</button>
-        <button id="btnFlipCam" class="ghost">翻转</button>
-      </div>
-      <div class="row">
-        <span class="row-label">麦克风</span>
-        <button id="btnStartMic" class="primary">开启</button>
-        <button id="btnStopMic" class="ghost">关闭</button>
       </div>
     </div>
 
@@ -457,7 +392,5 @@
 
 <!-- 主脚本 -->
 <script type="module" src="/static/main.js"></script>
-<!-- 手机端摄像头 + 麦克风 -->
-<script src="/static/mobile.js"></script>
 </body>
 </html>

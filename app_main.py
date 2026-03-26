@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 import re
+from memory_manager import memory_manager
 # 在其它 import 之后加：
 from qwen_extractor import extract_english_label
 from navigation_master import NavigationMaster, OrchestratorResult 
@@ -620,9 +621,19 @@ async def start_ai_with_text_custom(user_text: str):
 # ========= Omni 播放启动 =========
 async def start_ai_with_text(user_text: str):
     """硬重置后，开启新的 AI 语音输出。"""
+    # 异步更新用户长期记忆
+    asyncio.create_task(asyncio.to_thread(memory_manager.update, user_text))
+    
     async def _runner():
         txt_buf: List[str] = []
         rate_state = None
+
+        # 构建含长期记忆的 Prompt
+        mem_ctx = memory_manager.get_context()
+        if mem_ctx:
+            enhanced_text = f"【系统提示：{mem_ctx}】\n\n用户说：{user_text}"
+        else:
+            enhanced_text = user_text
 
         # 组装（图像+文本）
         content_list = []
@@ -636,7 +647,7 @@ async def start_ai_with_text(user_text: str):
                 })
             except Exception:
                 pass
-        content_list.append({"type": "text", "text": user_text})
+        content_list.append({"type": "text", "text": enhanced_text})
 
         try:
             async for piece in stream_chat(content_list, voice="Cherry", audio_format="wav"):
@@ -1277,9 +1288,16 @@ class UDPProto(asyncio.DatagramProtocol):
 
 
 
+# === 防止双端口模式下 startup 重复执行 ===
+_startup_done = False
+
 # === 新增：注册给 bridge_io 的发送回调（把 JPEG 广播给 /ws/viewer） ===
 @app.on_event("startup")
 async def on_startup_register_bridge_sender():
+    global _startup_done
+    if _startup_done:
+        return
+
     # 保存主线程的事件循环
     main_loop = asyncio.get_event_loop()
     
@@ -1323,6 +1341,8 @@ async def on_startup_register_bridge_sender():
 
 @app.on_event("startup")
 async def on_startup_init_audio():
+    if _startup_done:
+        return
     """启动时初始化音频系统"""
     # 在后台线程中初始化，避免阻塞启动
     def _init():
@@ -1335,6 +1355,8 @@ async def on_startup_init_audio():
 
 @app.on_event("startup")
 async def on_startup_audio_tests():
+    if _startup_done:
+        return
     """启动时自动启动音频测试（麦克风、扬声器）"""
     def _start():
         try:
@@ -1347,6 +1369,10 @@ async def on_startup_audio_tests():
 
 @app.on_event("startup")
 async def on_startup():
+    global _startup_done
+    if _startup_done:
+        return
+    _startup_done = True  # 最后一个 startup，设置标志
     loop = asyncio.get_running_loop()
     await loop.create_datagram_endpoint(lambda: UDPProto(), local_addr=(UDP_IP, UDP_PORT))
 
@@ -1380,20 +1406,9 @@ def get_camera_ws():
     return esp32_camera_ws
 
 if __name__ == "__main__":
-    import os, ssl as _ssl
-    _ssl_dir = os.path.join(os.path.dirname(__file__), "ssl")
-    _cert = os.path.join(_ssl_dir, "cert.pem")
-    _key  = os.path.join(_ssl_dir, "key.pem")
-    _ssl_kw = {}
-    if os.path.isfile(_cert) and os.path.isfile(_key):
-        _ssl_kw["ssl_certfile"] = _cert
-        _ssl_kw["ssl_keyfile"]  = _key
-        print(f"[STARTUP] HTTPS 已启用 (cert={_cert})")
-    else:
-        print("[STARTUP] 未找到 SSL 证书，使用 HTTP 模式")
+    print("[STARTUP] 启动 HTTP:8081")
     uvicorn.run(
         app, host="0.0.0.0", port=8081,
         log_level="warning", access_log=False,
         loop="asyncio", workers=1, reload=False,
-        **_ssl_kw
     )
