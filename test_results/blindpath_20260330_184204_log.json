@@ -1,0 +1,140 @@
+{
+  "metadata": {
+    "test_id": "blindpath_20260330_184204",
+    "test_mode": "blindpath",
+    "start_time": 1774867324.638742,
+    "end_time": 1774867331.8438468,
+    "total_frames": 14,
+    "video_path": "f4f301e2-2884-497d-8997-2940ff2d9239",
+    "results": {
+      "test_id": "blindpath_20260330_184204",
+      "test_mode": "blindpath",
+      "duration": "7.21s",
+      "total_frames": 14,
+      "state_changes": 0,
+      "guidance_count": 3,
+      "error_count": 0,
+      "fps": 1.943066802557213
+    }
+  },
+  "statistics": {
+    "total_frames": 14,
+    "state_changes": [],
+    "guidance_count": 3,
+    "error_count": 0
+  },
+  "frames": [
+    {
+      "frame_number": 0,
+      "timestamp": 1774867327.4994247,
+      "relative_time": 2.860682725906372,
+      "navigation_state": "BLINDPATH_NAV",
+      "guidance_text": "",
+      "extras": {}
+    },
+    {
+      "frame_number": 1,
+      "timestamp": 1774867328.0179172,
+      "relative_time": 3.3791751861572266,
+      "navigation_state": "BLINDPATH_NAV",
+      "guidance_text": "方向已对正！现在校准位置。",
+      "extras": {}
+    },
+    {
+      "frame_number": 2,
+      "timestamp": 1774867328.2065485,
+      "relative_time": 3.5678064823150635,
+      "navigation_state": "BLINDPATH_NAV",
+      "guidance_text": "",
+      "extras": {}
+    },
+    {
+      "frame_number": 3,
+      "timestamp": 1774867328.4023662,
+      "relative_time": 3.7636241912841797,
+      "navigation_state": "BLINDPATH_NAV",
+      "guidance_text": "",
+      "extras": {}
+    },
+    {
+      "frame_number": 4,
+      "timestamp": 1774867328.6045022,
+      "relative_time": 3.9657602310180664,
+      "navigation_state": "BLINDPATH_NAV",
+      "guidance_text": "",
+      "extras": {}
+    },
+    {
+      "frame_number": 5,
+      "timestamp": 1774867328.7998602,
+      "relative_time": 4.161118268966675,
+      "navigation_state": "BLINDPATH_NAV",
+      "guidance_text": "",
+      "extras": {}
+    },
+    {
+      "frame_number": 6,
+      "timestamp": 1774867328.9895093,
+      "relative_time": 4.350767374038696,
+      "navigation_state": "BLINDPATH_NAV",
+      "guidance_text": "保持直行",
+      "extras": {}
+    },
+    {
+      "frame_number": 7,
+      "timestamp": 1774867329.2257192,
+      "relative_time": 4.586977243423462,
+      "navigation_state": "BLINDPATH_NAV",
+      "guidance_text": "",
+      "extras": {}
+    },
+    {
+      "frame_number": 8,
+      "timestamp": 1774867329.4550374,
+      "relative_time": 4.816295385360718,
+      "navigation_state": "BLINDPATH_NAV",
+      "guidance_text": "",
+      "extras": {}
+    },
+    {
+      "frame_number": 9,
+      "timestamp": 1774867329.7063456,
+      "relative_time": 5.067603588104248,
+      "navigation_state": "BLINDPATH_NAV",
+      "guidance_text": "",
+      "extras": {}
+    },
+    {
+      "frame_number": 10,
+      "timestamp": 1774867329.9651356,
+      "relative_time": 5.3263936042785645,
+      "navigation_state": "BLINDPATH_NAV",
+      "guidance_text": "",
+      "extras": {}
+    },
+    {
+      "frame_number": 11,
+      "timestamp": 1774867330.210784,
+      "relative_time": 5.572041988372803,
+      "navigation_state": "BLINDPATH_NAV",
+      "guidance_text": "",
+      "extras": {}
+    },
+    {
+      "frame_number": 12,
+      "timestamp": 1774867330.6054285,
+      "relative_time": 5.966686487197876,
+      "navigation_state": "BLINDPATH_NAV",
+      "guidance_text": "保持直行",
+      "extras": {}
+    },
+    {
+      "frame_number": 13,
+      "timestamp": 1774867330.860759,
+      "relative_time": 6.222017049789429,
+      "navigation_state": "BLINDPATH_NAV",
+      "guidance_text": "",
+      "extras": {}
+    }
+  ]
+}

@@ -16,8 +16,8 @@ using namespace websockets;
 #include "camera_pins.h"
 
 // ===== WiFi / Server (EDIT THESE) =====
-static const char* WIFI_SSID = "2018";
-static const char* WIFI_PASS = "20182018";
+static const char* WIFI_SSID = "fei14pro";
+static const char* WIFI_PASS = "13392903419";
 
 // Use your PC LAN IP (NOT 127.0.0.1). Example: "192.168.1.100"
 static const char* SERVER_HOST = "47.98.17.243";

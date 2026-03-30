@@ -730,6 +730,143 @@ def health():
 # 注册 /stream.wav
 register_stream_route(app)
 
+# ---------- 视频测试页面 ----------
+@app.get("/video_test", response_class=HTMLResponse)
+def video_test_page():
+    """视频测试页面"""
+    with open(os.path.join("templates", "video_test.html"), "r", encoding="utf-8") as f:
+        return HTMLResponse(f.read())
+
+# ---------- 视频测试控制 API ----------
+from fastapi import UploadFile, File
+from video_test_recorder import get_test_recorder, create_test_recorder, destroy_test_recorder, VideoTestRecorder
+
+test_recorders: Dict[str, VideoTestRecorder] = {}
+
+# 创建测试结果目录
+os.makedirs("test_results", exist_ok=True)
+os.makedirs("test_results/temp", exist_ok=True)
+
+@app.post("/api/test/start")
+async def start_test(request: Request):
+    """开始测试"""
+    data = await request.json()
+    test_mode = data.get("mode")  # blindpath, crossing, trafficlight, itemsearch
+    video_name = data.get("video_name", "")
+
+    if not test_mode:
+        return {"error": "缺少测试模式"}
+
+    # 创建测试记录器
+    recorder = create_test_recorder(test_mode, save_original_frames=False)
+    test_id = recorder.test_id
+    test_recorders[test_id] = recorder
+
+    # 启动对应的导航模式
+    if orchestrator:
+        if test_mode == "blindpath":
+            orchestrator.start_blind_path_navigation()
+        elif test_mode == "crossing":
+            orchestrator.start_crossing()
+        elif test_mode == "trafficlight":
+            orchestrator.start_traffic_light_detection()
+        elif test_mode == "itemsearch":
+            orchestrator.start_item_search()
+
+    recorder.start_recording(video_path=video_name)
+
+    return {
+        "success": True,
+        "test_id": test_id,
+        "message": f"开始 {test_mode} 测试"
+    }
+
+@app.post("/api/test/stop")
+async def stop_test(request: Request):
+    """停止测试"""
+    data = await request.json()
+    test_id = data.get("test_id")
+
+    recorder = test_recorders.get(test_id)
+    if not recorder:
+        return {"error": "测试不存在"}
+
+    # 停止记录
+    results = recorder.stop_recording()
+
+    # 停止导航
+    if orchestrator:
+        orchestrator.stop_navigation()
+
+    # 保存结果
+    output_dir = "test_results"
+    video_path = recorder.save_annotated_video(output_dir=output_dir)
+    log_path = recorder.save_test_log(output_dir=output_dir)
+
+    return {
+        "success": True,
+        "results": results,
+        "annotated_video": video_path,
+        "test_log": log_path
+    }
+
+@app.get("/api/test/results/{test_id}")
+async def get_test_results(test_id: str):
+    """获取测试结果"""
+    recorder = test_recorders.get(test_id)
+    if not recorder:
+        return {"error": "测试不存在"}
+
+    return {
+        "test_id": test_id,
+        "summary": recorder.get_summary()
+    }
+
+@app.get("/api/test/download/{test_id}")
+async def download_test_results(test_id: str):
+    """下载测试结果（打包所有文件）"""
+    import shutil
+    from fastapi.responses import FileResponse
+
+    recorder = test_recorders.get(test_id)
+    if not recorder:
+        return {"error": "测试不存在"}
+
+    # 创建临时打包目录
+    temp_dir = f"test_results/temp/{test_id}"
+    os.makedirs(temp_dir, exist_ok=True)
+
+    # 复制所有结果文件
+    output_dir = "test_results"
+    src_files = [
+        os.path.join(output_dir, f"{test_id}_annotated.mp4"),
+        os.path.join(output_dir, f"{test_id}_log.json")
+    ]
+
+    for src in src_files:
+        if os.path.exists(src):
+            shutil.copy2(src, temp_dir)
+
+    # 打包成zip
+    zip_path = os.path.join("test_results", f"{test_id}_results.zip")
+    shutil.make_archive(
+        base_name=os.path.join("test_results", test_id + "_results"),
+        format="zip",
+        root_dir=temp_dir
+    )
+
+    # 清理临时目录
+    shutil.rmtree(temp_dir, ignore_errors=True)
+
+    if os.path.exists(zip_path):
+        return FileResponse(
+            zip_path,
+            media_type="application/zip",
+            filename=f"{test_id}_results.zip"
+        )
+    else:
+        return {"error": "打包失败"}
+
 # ---------- WebSocket：WebUI 文本（ASR/AI 状态推送） ----------
 @app.websocket("/ws_ui")
 async def ws_ui(ws: WebSocket):
@@ -1035,6 +1172,20 @@ async def ws_camera_esp(ws: WebSocket):
                                     )
                                 except Exception:
                                     pass
+
+                            # 【新增】记录测试数据
+                            recorder = get_test_recorder()
+                            if recorder and recorder._is_recording:
+                                try:
+                                    recorder.record_frame(
+                                        original_frame=bgr,
+                                        annotated_frame=out_img,
+                                        navigation_state=orchestrator.get_state() if orchestrator else "",
+                                        guidance_text=guidance or ""
+                                    )
+                                except Exception as e:
+                                    print(f"[TEST_RECORDER] 记录帧失败: {e}")
+
                             # 广播推理结果帧
                             if camera_viewers and out_img is not None:
                                 try:
@@ -1133,6 +1284,204 @@ async def ws_viewer(ws: WebSocket):
         except Exception: 
             pass
         print(f"[VIEWER] Removed. Total viewers: {len(camera_viewers)}", flush=True)
+
+# ---------- WebSocket：视频测试专用 ----------
+test_camera_ws: Optional[WebSocket] = None
+
+@app.websocket("/ws/test_camera")
+async def ws_test_camera(ws: WebSocket):
+    """接收视频测试页面发送的帧数据"""
+    global test_camera_ws
+    test_camera_ws = ws
+    await ws.accept()
+    print("[TEST_CAMERA] 视频测试相机连接")
+
+    # 初始化导航器（如果还没初始化）
+    global blind_path_navigator, cross_street_navigator, orchestrator
+
+    if blind_path_navigator is None and yolo_seg_model is not None:
+        blind_path_navigator = BlindPathNavigator(yolo_seg_model, obstacle_detector)
+        print("[TEST_CAMERA] 盲道导航器已初始化")
+
+    if cross_street_navigator is None and yolo_seg_model is not None:
+        cross_street_navigator = CrossStreetNavigator(
+            seg_model=yolo_seg_model,
+            coco_model=None,
+            obs_model=None
+        )
+        print("[TEST_CAMERA] 过马路导航器已初始化")
+
+    if orchestrator is None and blind_path_navigator is not None and cross_street_navigator is not None:
+        orchestrator = NavigationMaster(blind_path_navigator, cross_street_navigator)
+        print("[TEST_CAMERA] 统领状态机已初始化")
+
+    try:
+        while True:
+            msg = await ws.receive()
+
+            # 接收文本命令
+            if "text" in msg and msg["text"] is not None:
+                command = msg["text"].strip()
+
+                # 处理测试命令
+                if command.startswith("MODE:"):
+                    mode = command[5:].strip()
+                    print(f"[TEST_CAMERA] 切换测试模式: {mode}")
+
+                    if orchestrator:
+                        if mode == "blindpath":
+                            orchestrator.start_blind_path_navigation()
+                        elif mode == "crossing":
+                            orchestrator.start_crossing()
+                        elif mode == "trafficlight":
+                            orchestrator.start_traffic_light_detection()
+                        elif mode == "itemsearch":
+                            orchestrator.start_item_search()
+
+                        await ws.send_text(f"MODE_SET:{mode}")
+
+                elif command == "START_TEST":
+                    recorder = get_test_recorder()
+                    if recorder:
+                        recorder.start_recording()
+                        await ws.send_text("TEST_STARTED")
+                    else:
+                        await ws.send_text("ERROR:No recorder")
+
+                elif command == "STOP_TEST":
+                    recorder = get_test_recorder()
+                    if recorder:
+                        results = recorder.stop_recording()
+                        await ws.send_text(f"TEST_STOPPED:{results.get('total_frames', 0)}")
+                    else:
+                        await ws.send_text("ERROR:No recorder")
+
+            # 接收帧数据（base64编码的JPEG）
+            elif "bytes" in msg and msg["bytes"] is not None:
+                try:
+                    # 解码JPEG帧
+                    arr = np.frombuffer(msg["bytes"], dtype=np.uint8)
+                    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+
+                    if bgr is not None:
+                        # 添加到帧队列（供其他模块使用）
+                        bridge_io.push_raw_jpeg(msg["bytes"])
+
+                        # 保存到last_frames（供AI对话使用）
+                        try:
+                            last_frames.append((time.time(), msg["bytes"]))
+                        except Exception:
+                            pass
+
+                        # 执行推理处理
+                        if orchestrator and not yolomedia_running:
+                            current_state = orchestrator.get_state()
+
+                            # 如果不是ITEM_SEARCH模式，执行导航处理
+                            if current_state != "ITEM_SEARCH":
+                                global _infer_busy, _latest_result_img
+
+                                if not _infer_busy:
+                                    _infer_busy = True
+                                    loop = asyncio.get_event_loop()
+
+                                    def _sync_infer(frame, state):
+                                        """在线程池中同步执行推理"""
+                                        global _infer_busy, _latest_result_img
+                                        out = frame
+                                        guidance = None
+                                        try:
+                                            if state == "TRAFFIC_LIGHT_DETECTION":
+                                                import trafficlight_detection
+                                                result = trafficlight_detection.process_single_frame(frame, ui_broadcast_callback=ui_broadcast_final)
+                                                out = result['vis_image'] if result['vis_image'] is not None else frame
+                                            else:
+                                                res = orchestrator.process_frame(frame)
+                                                guidance = res.guidance_text
+                                                out = res.annotated_image if res.annotated_image is not None else frame
+                                        except Exception as e:
+                                            print(f"[TEST_CAMERA] 推理出错: {e}")
+                                        finally:
+                                            with _latest_result_lock:
+                                                _latest_result_img = out
+                                            _infer_busy = False
+                                        return out, guidance
+
+                                    def _on_infer_done(fut):
+                                        """推理完成回调"""
+                                        try:
+                                            out_img, guidance = fut.result()
+                                        except Exception:
+                                            return
+
+                                        # 记录测试数据
+                                        recorder = get_test_recorder()
+                                        if recorder and recorder._is_recording:
+                                            try:
+                                                recorder.record_frame(
+                                                    original_frame=bgr,
+                                                    annotated_frame=out_img,
+                                                    navigation_state=orchestrator.get_state() if orchestrator else "",
+                                                    guidance_text=guidance or ""
+                                                )
+                                            except Exception as e:
+                                                print(f"[TEST_CAMERA] 记录帧失败: {e}")
+
+                                        # 播放语音
+                                        if guidance:
+                                            try:
+                                                play_voice_text(guidance)
+                                                asyncio.run_coroutine_threadsafe(
+                                                    ui_broadcast_final(f"[导航] {guidance}"), loop
+                                                )
+                                            except Exception:
+                                                pass
+
+                                        # 发送处理后的帧回前端
+                                        if out_img is not None:
+                                            try:
+                                                ok, enc = cv2.imencode(".jpg", out_img, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+                                                if ok:
+                                                    jpeg_data = enc.tobytes()
+                                                    asyncio.run_coroutine_threadsafe(
+                                                        ws.send_bytes(jpeg_data), loop
+                                                    )
+                                            except Exception:
+                                                pass
+
+                                    fut = _infer_executor.submit(_sync_infer, bgr.copy(), current_state)
+                                    fut.add_done_callback(_on_infer_done)
+                                else:
+                                    # GPU忙，发送缓存的帧
+                                    with _latest_result_lock:
+                                        cached = _latest_result_img
+                                    show_img = cached if cached is not None else bgr
+                                    try:
+                                        ok, enc = cv2.imencode(".jpg", show_img, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+                                        if ok:
+                                            jpeg_data = enc.tobytes()
+                                            await ws.send_bytes(jpeg_data)
+                                    except Exception:
+                                        pass
+
+                except Exception as e:
+                    print(f"[TEST_CAMERA] 处理帧失败: {e}")
+
+            elif "type" in msg and msg["type"] in ("websocket.close", "websocket.disconnect"):
+                break
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"[TEST_CAMERA ERROR] {e}")
+    finally:
+        try:
+            if WebSocketState is None or ws.client_state == WebSocketState.CONNECTED:
+                await ws.close(code=1000)
+        except Exception:
+            pass
+        test_camera_ws = None
+        print("[TEST_CAMERA] 视频测试相机断开")
 
 # ---------- WebSocket：浏览器订阅 IMU ----------
 @app.websocket("/ws")
@@ -1375,6 +1724,14 @@ async def on_startup():
     _startup_done = True  # 最后一个 startup，设置标志
     loop = asyncio.get_running_loop()
     await loop.create_datagram_endpoint(lambda: UDPProto(), local_addr=(UDP_IP, UDP_PORT))
+
+    # 创建测试结果目录
+    try:
+        os.makedirs("test_results", exist_ok=True)
+        os.makedirs("test_results/temp", exist_ok=True)
+        print("[STARTUP] 测试结果目录已创建")
+    except Exception as e:
+        print(f"[STARTUP] 创建测试结果目录失败: {e}")
 
 @app.on_event("shutdown")
 async def on_shutdown():

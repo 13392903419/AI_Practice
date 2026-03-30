@@ -1,0 +1,960 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>视频测试 - 智能盲人导航系统</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Georgia&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg-cream: #F5F1E8;
+    --bg-warm: #EDE8DC;
+    --text-primary: #1A1A1A;
+    --text-secondary: #6B6560;
+    --text-muted: #9A958F;
+    --accent-orange: #E85D04;
+    --accent-orange-soft: #FFF0E8;
+    --border-warm: #D4CFC5;
+    --card-bg: #FAF7F2;
+    --success: #4A7C59;
+    --error: #C5453A;
+  }
+
+  * { box-sizing: border-box }
+
+  body {
+    margin: 0;
+    background: var(--bg-cream);
+    color: var(--text-primary);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1, h2, h3, h4 {
+    font-family: Georgia, 'Times New Roman', serif;
+    font-weight: normal;
+    margin: 0;
+  }
+
+  .app {
+    display: grid;
+    grid-template-columns: 1fr 400px;
+    gap: 24px;
+    height: 100vh;
+    padding: 24px;
+  }
+
+  .stage {
+    position: relative;
+    border-radius: 16px;
+    background: var(--card-bg);
+    border: 1px solid var(--border-warm);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.04), 0 8px 32px rgba(0,0,0,0.06);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .video-container {
+    flex: 1;
+    position: relative;
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  #sourceVideo {
+    max-width: 100%;
+    max-height: 100%;
+    display: none;
+  }
+
+  #outputCanvas {
+    max-width: 100%;
+    max-height: 100%;
+    display: block;
+  }
+
+  /* 上传区域 */
+  .upload-area {
+    padding: 40px;
+    text-align: center;
+    border: 2px dashed var(--border-warm);
+    border-radius: 12px;
+    margin: 20px;
+    background: var(--bg-warm);
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+
+  .upload-area:hover {
+    border-color: var(--accent-orange);
+    background: var(--accent-orange-soft);
+  }
+
+  .upload-area.dragover {
+    border-color: var(--accent-orange);
+    background: var(--accent-orange-soft);
+    transform: scale(1.02);
+  }
+
+  .upload-icon {
+    font-size: 48px;
+    margin-bottom: 16px;
+    opacity: 0.5;
+  }
+
+  /* 控制面板 */
+  .control-panel {
+    padding: 20px;
+    background: var(--card-bg);
+    border-radius: 16px;
+    border: 1px solid var(--border-warm);
+    overflow-y: auto;
+  }
+
+  .panel-section {
+    margin-bottom: 24px;
+  }
+
+  .panel-section h3 {
+    font-size: 16px;
+    margin-bottom: 12px;
+    color: var(--text-primary);
+  }
+
+  .btn {
+    padding: 10px 16px;
+    border: none;
+    border-radius: 8px;
+    font-family: 'Inter', sans-serif;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .btn-primary {
+    background: var(--accent-orange);
+    color: white;
+  }
+
+  .btn-primary:hover {
+    background: #D14D00;
+    transform: translateY(-1px);
+  }
+
+  .btn-primary:disabled {
+    background: var(--text-muted);
+    cursor: not-allowed;
+    transform: none;
+  }
+
+  .btn-secondary {
+    background: var(--bg-warm);
+    color: var(--text-primary);
+    border: 1px solid var(--border-warm);
+  }
+
+  .btn-secondary:hover {
+    background: var(--border-warm);
+  }
+
+  .btn-success {
+    background: var(--success);
+    color: white;
+  }
+
+  .btn-success:hover {
+    background: #3A6349;
+  }
+
+  /* 测试模式选择 */
+  .mode-selector {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .mode-option {
+    padding: 12px;
+    border: 2px solid var(--border-warm);
+    border-radius: 8px;
+    background: var(--bg-cream);
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.2s ease;
+  }
+
+  .mode-option:hover {
+    border-color: var(--accent-orange);
+  }
+
+  .mode-option.active {
+    border-color: var(--accent-orange);
+    background: var(--accent-orange-soft);
+    color: var(--accent-orange);
+    font-weight: 600;
+  }
+
+  /* 播放控制 */
+  .playback-controls {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .speed-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .speed-control input {
+    flex: 1;
+  }
+
+  /* 状态显示 */
+  .status-display {
+    background: var(--bg-cream);
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 13px;
+  }
+
+  .status-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border-warm);
+  }
+
+  .status-item:last-child {
+    border-bottom: none;
+  }
+
+  .status-label {
+    color: var(--text-secondary);
+  }
+
+  .status-value {
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  /* 进度条 */
+  .progress-bar {
+    width: 100%;
+    height: 6px;
+    background: var(--border-warm);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 12px;
+  }
+
+  .progress-fill {
+    height: 100%;
+    background: var(--accent-orange);
+    transition: width 0.1s linear;
+  }
+
+  /* 日志区域 */
+  .log-area {
+    background: #1A1A1A;
+    color: #00FF00;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 12px;
+    padding: 12px;
+    border-radius: 8px;
+    height: 200px;
+    overflow-y: auto;
+    margin-top: 16px;
+  }
+
+  .log-entry {
+    padding: 2px 0;
+    word-break: break-all;
+  }
+
+  .log-entry.error {
+    color: #FF6B6B;
+  }
+
+  .log-entry.success {
+    color: #69DB7C;
+  }
+
+  .log-entry.info {
+    color: #74C0FC;
+  }
+
+  /* 隐藏的文件输入 */
+  #fileInput {
+    display: none;
+  }
+
+  /* 加载动画 */
+  .loading {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--border-warm);
+    border-top-color: var(--accent-orange);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  /* 测试结果卡片 */
+  .result-card {
+    background: var(--bg-cream);
+    border: 1px solid var(--border-warm);
+    border-radius: 8px;
+    padding: 12px;
+    margin-top: 12px;
+    display: none;
+  }
+
+  .result-card.show {
+    display: block;
+  }
+
+  .result-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 0;
+    font-size: 13px;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- 左侧视频区域 -->
+  <div class="stage">
+    <!-- 上传区域 -->
+    <div id="uploadArea" class="upload-area">
+      <div class="upload-icon">📁</div>
+      <h3>点击或拖拽上传测试视频</h3>
+      <p style="color: var(--text-secondary); margin-top: 8px;">支持 MP4, AVI, MOV 等常见格式</p>
+      <input type="file" id="fileInput" accept="video/*">
+    </div>
+
+    <!-- 视频显示区域 -->
+    <div class="video-container" id="videoContainer" style="display: none;">
+      <video id="sourceVideo" playsinline muted></video>
+      <canvas id="outputCanvas"></canvas>
+    </div>
+  </div>
+
+  <!-- 右侧控制面板 -->
+  <div class="control-panel">
+    <h2 style="margin-bottom: 20px;">视频测试控制台</h2>
+
+    <!-- 测试模式选择 -->
+    <div class="panel-section">
+      <h3>选择测试模式</h3>
+      <div class="mode-selector">
+        <div class="mode-option" data-mode="blindpath" onclick="selectMode('blindpath')">
+          🦯 盲道导航
+        </div>
+        <div class="mode-option" data-mode="crossing" onclick="selectMode('crossing')">
+          🚦 过马路
+        </div>
+        <div class="mode-option" data-mode="trafficlight" onclick="selectMode('trafficlight')">
+          🚥 红绿灯检测
+        </div>
+        <div class="mode-option" data-mode="itemsearch" onclick="selectMode('itemsearch')">
+          🔍 物品查找
+        </div>
+      </div>
+    </div>
+
+    <!-- 物品名称输入（仅在物品查找模式显示） -->
+    <div class="panel-section" id="itemSearchSection" style="display: none;">
+      <h3>要查找的物品</h3>
+      <input type="text" id="itemNameInput" placeholder="例如：红牛、AD钙奶"
+             style="width: 100%; padding: 10px; border: 1px solid var(--border-warm); border-radius: 8px; font-size: 14px;">
+    </div>
+
+    <!-- 播放控制 -->
+    <div class="panel-section">
+      <h3>播放控制</h3>
+      <div class="playback-controls">
+        <button class="btn btn-primary" id="playBtn" onclick="togglePlay()" disabled>
+          ▶ 播放
+        </button>
+        <button class="btn btn-secondary" id="pauseBtn" onclick="pauseTest()" disabled>
+          ⏸ 暂停
+        </button>
+        <button class="btn btn-secondary" id="resetBtn" onclick="resetTest()" disabled>
+          ↺ 重置
+        </button>
+      </div>
+      <div class="speed-control">
+        <span style="font-size: 13px; color: var(--text-secondary);">播放速度:</span>
+        <input type="range" id="speedSlider" min="0.1" max="2" step="0.1" value="1" onchange="updateSpeed()">
+        <span id="speedValue" style="font-size: 13px; min-width: 40px;">1.0x</span>
+      </div>
+      <div class="progress-bar">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+    </div>
+
+    <!-- 测试操作 -->
+    <div class="panel-section">
+      <h3>测试操作</h3>
+      <button class="btn btn-success" id="startTestBtn" onclick="startTest()" disabled style="width: 100%; margin-bottom: 8px;">
+        🚀 开始测试
+      </button>
+      <button class="btn btn-secondary" id="stopTestBtn" onclick="stopTest()" disabled style="width: 100%;">
+        ⏹ 停止测试
+      </button>
+    </div>
+
+    <!-- 状态显示 -->
+    <div class="panel-section">
+      <h3>实时状态</h3>
+      <div class="status-display">
+        <div class="status-item">
+          <span class="status-label">连接状态</span>
+          <span class="status-value" id="wsStatus">未连接</span>
+        </div>
+        <div class="status-item">
+          <span class="status-label">当前帧</span>
+          <span class="status-value" id="frameCount">0</span>
+        </div>
+        <div class="status-item">
+          <span class="status-label">导航状态</span>
+          <span class="status-value" id="navState">-</span>
+        </div>
+        <div class="status-item">
+          <span class="status-label">语音提示</span>
+          <span class="status-value" id="guidanceText">-</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 测试结果 -->
+    <div class="panel-section">
+      <h3>测试结果</h3>
+      <div class="result-card" id="resultCard">
+        <div class="result-item">
+          <span>总帧数</span>
+          <span id="totalFrames">0</span>
+        </div>
+        <div class="result-item">
+          <span>处理帧数</span>
+          <span id="processedFrames">0</span>
+        </div>
+        <div class="result-item">
+          <span>测试时长</span>
+          <span id="testDuration">0s</span>
+        </div>
+        <div style="margin-top: 12px; display: flex; gap: 8px;">
+          <button class="btn btn-primary" onclick="downloadResults()" style="flex: 1; font-size: 12px;">
+            📥 下载结果
+          </button>
+          <button class="btn btn-secondary" onclick="viewLogs()" style="flex: 1; font-size: 12px;">
+            📋 查看日志
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 日志区域 -->
+    <div class="log-area" id="logArea">
+      <div class="log-entry info">[系统] 等待上传视频...</div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ===== 全局变量 =====
+let ws = null;
+let sourceVideo = null;
+let outputCanvas = null;
+let outputCtx = null;
+let currentMode = null;
+let isPlaying = false;
+let isTesting = false;
+let frameCount = 0;
+let processedFrames = 0;
+let testStartTime = 0;
+let testResults = {
+  frames: [],
+  logs: [],
+  guidance: [],
+  states: []
+};
+let playSpeed = 1.0;
+let animationFrameId = null;
+let currentTestId = null;
+
+// ===== 初始化 =====
+document.addEventListener('DOMContentLoaded', () => {
+  sourceVideo = document.getElementById('sourceVideo');
+  outputCanvas = document.getElementById('outputCanvas');
+  outputCtx = outputCanvas.getContext('2d');
+
+  // 上传区域事件
+  const uploadArea = document.getElementById('uploadArea');
+  const fileInput = document.getElementById('fileInput');
+
+  uploadArea.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', handleFileSelect);
+
+  uploadArea.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    uploadArea.classList.add('dragover');
+  });
+
+  uploadArea.addEventListener('dragleave', () => {
+    uploadArea.classList.remove('dragover');
+  });
+
+  uploadArea.addEventListener('drop', (e) => {
+    e.preventDefault();
+    uploadArea.classList.remove('dragover');
+    if (e.dataTransfer.files.length > 0) {
+      handleFile(e.dataTransfer.files[0]);
+    }
+  });
+
+  // 视频事件
+  sourceVideo.addEventListener('loadedmetadata', onVideoLoaded);
+  sourceVideo.addEventListener('ended', onVideoEnded);
+
+  // 初始化 WebSocket 连接
+  connectWebSocket();
+});
+
+// ===== WebSocket 连接 =====
+function connectWebSocket() {
+  const wsUrl = `ws://${window.location.host}/ws/test_camera`;
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = () => {
+    document.getElementById('wsStatus').textContent = '已连接';
+    document.getElementById('wsStatus').style.color = 'var(--success)';
+    addLog('WebSocket 已连接', 'success');
+  };
+
+  ws.onclose = () => {
+    document.getElementById('wsStatus').textContent = '未连接';
+    document.getElementById('wsStatus').style.color = 'var(--error)';
+    addLog('WebSocket 连接断开', 'error');
+    // 5秒后重连
+    setTimeout(connectWebSocket, 5000);
+  };
+
+  ws.onerror = (error) => {
+    addLog('WebSocket 错误: ' + error, 'error');
+  };
+
+  ws.onmessage = async (event) => {
+    if (event.data instanceof Blob) {
+      // 接收处理后的帧
+      const arrayBuffer = await event.data.arrayBuffer();
+      const blob = new Blob([arrayBuffer], { type: 'image/jpeg' });
+      const img = new Image();
+      img.onload = () => {
+        outputCtx.drawImage(img, 0, 0, outputCanvas.width, outputCanvas.height);
+        processedFrames++;
+        document.getElementById('processedFrames').textContent = processedFrames;
+        URL.revokeObjectURL(img.src);
+      };
+      img.src = URL.createObjectURL(blob);
+    } else if (typeof event.data === 'string') {
+      // 接收文本消息
+      if (event.data.startsWith('MODE_SET:')) {
+        const mode = event.data.substring(9);
+        addLog(`模式已设置: ${getModeName(mode)}`, 'success');
+      } else if (event.data.startsWith('TEST_STARTED')) {
+        addLog('测试开始', 'success');
+      } else if (event.data.startsWith('TEST_STOPPED')) {
+        const frames = event.data.substring(12);
+        addLog(`测试完成，处理了 ${frames} 帧`, 'success');
+      }
+    }
+  };
+}
+
+// ===== 文件处理 =====
+function handleFileSelect(event) {
+  if (event.target.files.length > 0) {
+    handleFile(event.target.files[0]);
+  }
+}
+
+function handleFile(file) {
+  if (!file.type.startsWith('video/')) {
+    addLog('请选择有效的视频文件', 'error');
+    return;
+  }
+
+  addLog(`加载视频: ${file.name}`, 'info');
+  const url = URL.createObjectURL(file);
+  sourceVideo.src = url;
+
+  // 隐藏上传区域，显示视频区域
+  document.getElementById('uploadArea').style.display = 'none';
+  document.getElementById('videoContainer').style.display = 'flex';
+}
+
+function onVideoLoaded() {
+  // 设置 canvas 尺寸与视频一致
+  outputCanvas.width = sourceVideo.videoWidth;
+  outputCanvas.height = sourceVideo.videoHeight;
+
+  addLog(`视频加载成功: ${sourceVideo.videoWidth}x${sourceVideo.videoHeight}, ${sourceVideo.duration.toFixed(1)}s`, 'success');
+
+  // 启用播放按钮
+  document.getElementById('playBtn').disabled = false;
+  document.getElementById('startTestBtn').disabled = false;
+  document.getElementById('resetBtn').disabled = false;
+}
+
+function onVideoEnded() {
+  addLog('视频播放完成', 'info');
+  if (isTesting) {
+    stopTest();
+  }
+  isPlaying = false;
+  updatePlayButton();
+}
+
+// ===== 测试模式选择 =====
+function selectMode(mode) {
+  currentMode = mode;
+
+  // 更新 UI
+  document.querySelectorAll('.mode-option').forEach(el => {
+    el.classList.remove('active');
+  });
+  document.querySelector(`[data-mode="${mode}"]`).classList.add('active');
+
+  // 显示/隐藏物品搜索输入
+  document.getElementById('itemSearchSection').style.display =
+    (mode === 'itemsearch') ? 'block' : 'none';
+
+  addLog(`选择测试模式: ${getModeName(mode)}`, 'info');
+}
+
+function getModeName(mode) {
+  const names = {
+    'blindpath': '盲道导航',
+    'crossing': '过马路',
+    'trafficlight': '红绿灯检测',
+    'itemsearch': '物品查找'
+  };
+  return names[mode] || mode;
+}
+
+// ===== 播放控制 =====
+function togglePlay() {
+  if (isPlaying) {
+    pauseTest();
+  } else {
+    playVideo();
+  }
+}
+
+function playVideo() {
+  if (!sourceVideo.src) return;
+
+  isPlaying = true;
+  sourceVideo.play();
+  updatePlayButton();
+  addLog('开始播放', 'info');
+}
+
+function pauseTest() {
+  isPlaying = false;
+  if (sourceVideo.paused) {
+    sourceVideo.pause();
+  }
+  updatePlayButton();
+  addLog('暂停', 'info');
+}
+
+function resetTest() {
+  pauseTest();
+  sourceVideo.currentTime = 0;
+  frameCount = 0;
+  processedFrames = 0;
+  testResults = { frames: [], logs: [], guidance: [], states: [] };
+  document.getElementById('frameCount').textContent = '0';
+  document.getElementById('processedFrames').textContent = '0';
+  document.getElementById('progressFill').style.width = '0%';
+  addLog('重置视频', 'info');
+}
+
+function updateSpeed() {
+  playSpeed = parseFloat(document.getElementById('speedSlider').value);
+  document.getElementById('speedValue').textContent = playSpeed.toFixed(1) + 'x';
+  sourceVideo.playbackRate = playSpeed;
+  addLog(`播放速度: ${playSpeed.toFixed(1)}x`, 'info');
+}
+
+function updatePlayButton() {
+  const btn = document.getElementById('playBtn');
+  if (isPlaying) {
+    btn.innerHTML = '⏸ 暂停';
+  } else {
+    btn.innerHTML = '▶ 播放';
+  }
+  document.getElementById('pauseBtn').disabled = !isPlaying;
+}
+
+// ===== 测试控制 =====
+async function startTest() {
+  if (!currentMode) {
+    addLog('请先选择测试模式', 'error');
+    return;
+  }
+
+  if (currentMode === 'itemsearch') {
+    const itemName = document.getElementById('itemNameInput').value.trim();
+    if (!itemName) {
+      addLog('请输入要查找的物品名称', 'error');
+      return;
+    }
+  }
+
+  isTesting = true;
+  testStartTime = Date.now();
+  testResults = { frames: [], logs: [], guidance: [], states: [] };
+
+  document.getElementById('startTestBtn').disabled = true;
+  document.getElementById('stopTestBtn').disabled = false;
+  document.getElementById('resultCard').classList.add('show');
+
+  // 发送测试模式命令到后端
+  try {
+    const response = await fetch('/api/test/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mode: currentMode,
+        video_name: sourceVideo.src.split('/').pop() || 'test_video'
+      })
+    });
+
+    const data = await response.json();
+    if (data.success) {
+      currentTestId = data.test_id;
+      addLog(`测试已启动: ${data.message}`, 'success');
+    } else {
+      addLog(`启动失败: ${data.error}`, 'error');
+      return;
+    }
+  } catch (error) {
+    addLog(`启动失败: ${error}`, 'error');
+    return;
+  }
+
+  // 开始播放和帧发送
+  playVideo();
+  startFrameSending();
+
+  addLog(`开始测试: ${getModeName(currentMode)}`, 'success');
+}
+
+async function stopTest() {
+  isTesting = false;
+  cancelAnimationFrame(animationFrameId);
+
+  // 停止后端测试
+  try {
+    const response = await fetch('/api/test/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ test_id: currentTestId })
+    });
+
+    const data = await response.json();
+    if (data.success) {
+      addLog('后端测试已停止', 'success');
+      if (data.annotated_video) {
+        addLog(`标注视频: ${data.annotated_video}`, 'info');
+      }
+      if (data.test_log) {
+        addLog(`测试日志: ${data.test_log}`, 'info');
+      }
+    }
+  } catch (error) {
+    addLog(`停止测试失败: ${error}`, 'error');
+  }
+
+  document.getElementById('startTestBtn').disabled = false;
+  document.getElementById('stopTestBtn').disabled = true;
+
+  // 计算测试时长
+  const duration = ((Date.now() - testStartTime) / 1000).toFixed(1);
+  document.getElementById('testDuration').textContent = duration + 's';
+  document.getElementById('totalFrames').textContent = frameCount;
+
+  addLog(`测试完成: 处理了 ${processedFrames} 帧，用时 ${duration}s`, 'success');
+}
+
+function sendTestCommand(mode) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    addLog('WebSocket 未连接，无法发送命令', 'error');
+    return;
+  }
+
+  // 发送模式切换命令
+  ws.send(`MODE:${mode}`);
+  addLog(`发送模式命令: ${mode}`, 'info');
+
+  // 如果是物品查找，还需要发送物品名称
+  if (mode === 'itemsearch') {
+    const itemName = document.getElementById('itemNameInput').value.trim();
+    // 这里需要通过语音识别发送，暂时记录到日志
+    addLog(`物品查找: ${itemName} (需要语音触发)`, 'info');
+  }
+}
+
+// ===== 帧发送 =====
+function startFrameSending() {
+  let lastSendTime = 0;
+  const sendInterval = 33; // 约30fps
+
+  const sendFrame = (timestamp) => {
+    if (!isTesting || !isPlaying) {
+      animationFrameId = requestAnimationFrame(sendFrame);
+      return;
+    }
+
+    // 控制发送频率
+    if (timestamp - lastSendTime < sendInterval) {
+      animationFrameId = requestAnimationFrame(sendFrame);
+      return;
+    }
+    lastSendTime = timestamp;
+
+    // 从视频提取当前帧
+    outputCtx.drawImage(sourceVideo, 0, 0, outputCanvas.width, outputCanvas.height);
+
+    // 将canvas内容转换为blob并发送
+    outputCanvas.toBlob((blob) => {
+      if (blob && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(blob);
+        frameCount++;
+        document.getElementById('frameCount').textContent = frameCount;
+
+        // 更新进度条
+        const progress = (sourceVideo.currentTime / sourceVideo.duration) * 100;
+        document.getElementById('progressFill').style.width = progress + '%';
+      }
+    }, 'image/jpeg', 0.8);
+
+    animationFrameId = requestAnimationFrame(sendFrame);
+  };
+
+  sendFrame(0);
+}
+
+// ===== 日志系统 =====
+function addLog(message, type = 'info') {
+  const logArea = document.getElementById('logArea');
+  const timestamp = new Date().toLocaleTimeString();
+  const entry = document.createElement('div');
+  entry.className = `log-entry ${type}`;
+  entry.textContent = `[${timestamp}] ${message}`;
+  logArea.appendChild(entry);
+  logArea.scrollTop = logArea.scrollHeight;
+
+  // 保存到测试结果
+  testResults.logs.push({ timestamp, message, type });
+}
+
+// ===== 结果下载 =====
+async function downloadResults() {
+  if (!currentTestId) {
+    addLog('没有可下载的测试结果', 'error');
+    return;
+  }
+
+  addLog('正在下载测试结果...', 'info');
+
+  try {
+    // 从后端下载完整结果包（包含标注视频和日志）
+    const response = await fetch(`/api/test/download/${currentTestId}`);
+
+    if (!response.ok) {
+      throw new Error('下载失败');
+    }
+
+    // 获取文件名
+    const contentDisposition = response.headers.get('Content-Disposition');
+    let filename = `${currentTestId}_results.zip`;
+    if (contentDisposition) {
+      const match = contentDisposition.match(/filename="(.+)"/);
+      if (match) filename = match[1];
+    }
+
+    // 下载文件
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    addLog(`结果已下载: ${filename}`, 'success');
+  } catch (error) {
+    addLog(`下载失败: ${error}`, 'error');
+
+    // 如果后端下载失败，尝试下载前端日志
+    addLog('尝试下载前端日志...', 'info');
+    downloadFrontendLogs();
+  }
+}
+
+function downloadFrontendLogs() {
+  const results = {
+    test_id: currentTestId,
+    mode: currentMode,
+    startTime: new Date(testStartTime).toISOString(),
+    duration: ((Date.now() - testStartTime) / 1000).toFixed(2) + 's',
+    totalFrames: frameCount,
+    processedFrames: processedFrames,
+    logs: testResults.logs,
+    guidance: testResults.guidance,
+    states: testResults.states
+  };
+
+  const blob = new Blob([JSON.stringify(results, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `test_results_${currentTestId || Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+
+  addLog('前端日志已下载', 'success');
+}
+
+function viewLogs() {
+  console.table(testResults.logs);
+  addLog('日志已输出到浏览器控制台', 'info');
+}
+</script>
+</body>
+</html>
