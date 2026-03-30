@@ -380,6 +380,9 @@
         <div class="mode-option" data-mode="itemsearch" onclick="selectMode('itemsearch')">
           🔍 物品查找
         </div>
+        <div class="mode-option" data-mode="agent" onclick="selectMode('agent')">
+          🤖 Agent 测试
+        </div>
       </div>
     </div>
 
@@ -388,6 +391,50 @@
       <h3>要查找的物品</h3>
       <input type="text" id="itemNameInput" placeholder="例如：红牛、AD钙奶"
              style="width: 100%; padding: 10px; border: 1px solid var(--border-warm); border-radius: 8px; font-size: 14px;">
+    </div>
+
+    <!-- Agent 测试面板（仅在 Agent 模式显示） -->
+    <div class="panel-section" id="agentTestSection" style="display: none;">
+      <h3>🤖 Agent 意图识别测试</h3>
+
+      <!-- 快捷测试按钮 -->
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px;">
+        <button class="btn btn-secondary" onclick="testAgent('启动盲道导航')">盲道导航</button>
+        <button class="btn btn-secondary" onclick="testAgent('我要过马路')">过马路</button>
+        <button class="btn btn-secondary" onclick="testAgent('帮我找电梯')">找物品</button>
+        <button class="btn btn-secondary" onclick="testAgent('前面有什么')">障碍物</button>
+        <button class="btn btn-secondary" onclick="testAgent('检测红绿灯')">红绿灯</button>
+        <button class="btn btn-secondary" onclick="testAgent('记录一下，我经常去松江印象城')">记录路线</button>
+      </div>
+
+      <!-- 自定义输入 -->
+      <div style="margin-bottom: 12px;">
+        <label style="font-size: 13px; color: var(--text-secondary); display: block; margin-bottom: 6px;">
+          自定义测试输入：
+        </label>
+        <div style="display: flex; gap: 8px;">
+          <input type="text" id="agentInput" placeholder="输入任意文本测试 Agent"
+                 style="flex: 1; padding: 10px; border: 1px solid var(--border-warm); border-radius: 8px; font-size: 14px;"
+                 onkeypress="if(event.key==='Enter')testAgent(document.getElementById('agentInput').value)">
+          <button class="btn btn-primary" onclick="testAgent(document.getElementById('agentInput').value)">测试</button>
+        </div>
+      </div>
+
+      <!-- Agent 响应结果 -->
+      <div style="background: var(--bg-warm); padding: 12px; border-radius: 8px; font-size: 13px;">
+        <div style="margin-bottom: 8px;">
+          <strong>识别意图：</strong>
+          <span id="agentIntent" style="color: var(--accent-orange);">-</span>
+        </div>
+        <div style="margin-bottom: 8px;">
+          <strong>Agent 响应：</strong>
+          <span id="agentResponse">-</span>
+        </div>
+        <div>
+          <strong>导航状态：</strong>
+          <span id="agentState">-</span>
+        </div>
+      </div>
     </div>
 
     <!-- 播放控制 -->
@@ -620,7 +667,13 @@ function onVideoLoaded() {
   outputCanvas.width = sourceVideo.videoWidth;
   outputCanvas.height = sourceVideo.videoHeight;
 
-  addLog(`视频加载成功: ${sourceVideo.videoWidth}x${sourceVideo.videoHeight}, ${sourceVideo.duration.toFixed(1)}s`, 'success');
+  // 确保播放速度为1.0（正常速度）
+  sourceVideo.playbackRate = 1.0;
+  playSpeed = 1.0;
+  document.getElementById('speedSlider').value = 1.0;
+  document.getElementById('speedValue').textContent = '1.0x';
+
+  addLog(`视频加载成功: ${sourceVideo.videoWidth}x${sourceVideo.videoHeight}, ${sourceVideo.duration.toFixed(1)}s, FPS: 估计${30}`, 'success');
 
   // 启用播放按钮
   document.getElementById('playBtn').disabled = false;
@@ -651,6 +704,10 @@ function selectMode(mode) {
   document.getElementById('itemSearchSection').style.display =
     (mode === 'itemsearch') ? 'block' : 'none';
 
+  // 显示/隐藏 Agent 测试面板
+  document.getElementById('agentTestSection').style.display =
+    (mode === 'agent') ? 'block' : 'none';
+
   addLog(`选择测试模式: ${getModeName(mode)}`, 'info');
 }
 
@@ -659,9 +716,53 @@ function getModeName(mode) {
     'blindpath': '盲道导航',
     'crossing': '过马路',
     'trafficlight': '红绿灯检测',
-    'itemsearch': '物品查找'
+    'itemsearch': '物品查找',
+    'agent': 'Agent 测试'
   };
   return names[mode] || mode;
+}
+
+// ===== Agent 测试 =====
+async function testAgent(input) {
+  if (!input || !input.trim()) {
+    addLog('请输入测试内容', 'error');
+    return;
+  }
+
+  addLog(`Agent 测试输入: ${input}`, 'info');
+
+  // 清空上次结果
+  document.getElementById('agentIntent').textContent = '识别中...';
+  document.getElementById('agentResponse').textContent = '处理中...';
+  document.getElementById('agentState').textContent = '-';
+
+  try {
+    const response = await fetch('/api/agent/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({input: input.trim()})
+    });
+
+    const data = await response.json();
+
+    if (data.success !== false) {
+      // 更新结果显示
+      document.getElementById('agentIntent').textContent = data.intent || '-';
+      document.getElementById('agentResponse').textContent = data.response || '-';
+      document.getElementById('agentState').textContent = data.state || '-';
+
+      addLog(`Agent 响应: ${data.response}`, 'success');
+      addLog(`识别意图: ${data.intent}`, 'info');
+    } else {
+      document.getElementById('agentIntent').textContent = '错误';
+      document.getElementById('agentResponse').textContent = data.error || '未知错误';
+      addLog(`Agent 错误: ${data.error}`, 'error');
+    }
+  } catch (error) {
+    document.getElementById('agentIntent').textContent = '错误';
+    document.getElementById('agentResponse').textContent = error.message;
+    addLog(`Agent 请求失败: ${error.message}`, 'error');
+  }
 }
 
 // ===== 播放控制 =====
@@ -831,21 +932,12 @@ function sendTestCommand(mode) {
 
 // ===== 帧发送 =====
 function startFrameSending() {
-  let lastSendTime = 0;
-  const sendInterval = 33; // 约30fps
-
+  // 不再使用固定间隔，而是跟随视频播放速度
   const sendFrame = (timestamp) => {
     if (!isTesting || !isPlaying) {
       animationFrameId = requestAnimationFrame(sendFrame);
       return;
     }
-
-    // 控制发送频率
-    if (timestamp - lastSendTime < sendInterval) {
-      animationFrameId = requestAnimationFrame(sendFrame);
-      return;
-    }
-    lastSendTime = timestamp;
 
     // 从视频提取当前帧
     outputCtx.drawImage(sourceVideo, 0, 0, outputCanvas.width, outputCanvas.height);
@@ -866,7 +958,7 @@ function startFrameSending() {
     animationFrameId = requestAnimationFrame(sendFrame);
   };
 
-  sendFrame(0);
+  sendFrame();
 }
 
 // ===== 日志系统 =====
@@ -955,6 +1047,98 @@ function viewLogs() {
   console.table(testResults.logs);
   addLog('日志已输出到浏览器控制台', 'info');
 }
+
+// ===== 音画同步功能 =====
+// 全局变量
+let guidanceEvents = [];
+let lastPlayedGuidanceIndex = -1;
+
+/**
+ * 加载同步日志
+ */
+async function loadSyncLog(testId) {
+  try {
+    const response = await fetch(`/api/test/sync_log/${testId}`);
+    const syncData = await response.json();
+
+    if (syncData.error) {
+      addLog(`加载同步日志失败: ${syncData.error}`, 'error');
+      return;
+    }
+
+    guidanceEvents = syncData.guidance_events || [];
+    lastPlayedGuidanceIndex = -1;
+
+    addLog(`已加载 ${guidanceEvents.length} 条语音提示`, 'success');
+  } catch (error) {
+    addLog(`加载同步日志失败: ${error.message}`, 'error');
+  }
+}
+
+/**
+ * 视频时间更新事件处理 - 触发音画同步
+ */
+async function onVideoTimeUpdate() {
+  if (!sourceVideo.duration || guidanceEvents.length === 0) return;
+
+  const currentTime = sourceVideo.currentTime;
+
+  // 检查是否有语音提示需要播放
+  for (let i = lastPlayedGuidanceIndex + 1; i < guidanceEvents.length; i++) {
+    const event = guidanceEvents[i];
+
+    // 如果当前播放时间超过了语音提示时间（允许0.5秒误差）
+    if (currentTime >= event.relative_time - 0.5) {
+      await playGuidanceAtTime(event.text, event.relative_time);
+      lastPlayedGuidanceIndex = i;
+      addLog(`[${event.relative_time.toFixed(1)}s] ${event.text}`, 'info');
+    } else {
+      // 后续事件还没到时间
+      break;
+    }
+  }
+}
+
+/**
+ * 在指定时间播放语音提示
+ */
+async function playGuidanceAtTime(text, timestamp) {
+  try {
+    // 调用 TTS API 获取音频
+    const response = await fetch('/api/tts/synthesize', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: text})
+    });
+
+    if (!response.ok) {
+      addLog(`TTS 合成失败: ${response.status}`, 'error');
+      return;
+    }
+
+    // 播放音频
+    // 这里假设返回的是音频流或音频URL
+    // 实际实现取决于你的TTS API
+    addLog(`播放语音: ${text}`, 'info');
+
+  } catch (error) {
+    addLog(`播放语音失败: ${error.message}`, 'error');
+  }
+}
+
+/**
+ * 停止测试时加载同步日志
+ */
+const originalStopTest = stopTest;
+stopTest = async function() {
+  // 调用原始的停止测试函数
+  await originalStopTest();
+
+  // 如果有测试ID，加载同步日志
+  if (currentTestId) {
+    await loadSyncLog(currentTestId);
+  }
+};
 </script>
 </body>
 </html>

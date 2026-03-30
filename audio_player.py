@@ -44,7 +44,7 @@ AUDIO_MAP = {}
 
 # TTS 配置
 USE_TTS_FOR_UNKNOWN = True  # 对于未知的语音，使用 TTS 合成
-TTS_ENGINE = os.getenv("TTS_ENGINE", "edge")  # edge 或 dashscope
+TTS_ENGINE = "local"  # 固定使用本地 TTS (pyttsx3)，零网络延迟
 
 # 本地播放标志：True=直接播放, False=通过HTTP流
 USE_LOCAL_PLAYBACK = True
@@ -469,41 +469,29 @@ async def _synthesize_and_play(text: str):
     try:
         import audioop
 
-        if TTS_ENGINE == "edge":
-            # 使用 Edge-TTS
-            from edge_tts_client import synthesize_speech
+        if TTS_ENGINE == "local":
+            # 【本地 TTS】使用 pyttsx3（零网络延迟）
+            import pyttsx3
+            import threading
 
-            pcm24 = await synthesize_speech(text, voice="zh-CN-XiaoxiaoNeural")
+            def play_local_tts():
+                try:
+                    engine = pyttsx3.init()
+                    engine.setProperty('rate', 150)  # 语速
+                    engine.setProperty('volume', 0.9)  # 音量
+                    engine.say(text)
+                    engine.runAndWait()
+                    print(f"[TTS] 本地 TTS 播放完成: {text[:30]}...")
+                except Exception as e:
+                    print(f"[TTS] 本地 TTS 播放失败: {e}")
 
-            if pcm24:
-                # 24k → 8k
-                pcm8k, _ = audioop.ratecv(pcm24, 2, 1, 24000, 8000, None)
-                pcm8k = audioop.mul(pcm8k, 2, 0.60)
-                if pcm8k:
-                    await broadcast_pcm16_realtime(pcm8k)
-                    print(f"[TTS] Edge-TTS 播放完成，音频大小: {len(pcm8k)} 字节")
-                return
+            # 在后台线程中播放，避免阻塞
+            thread = threading.Thread(target=play_local_tts, daemon=True)
+            thread.start()
+            return
 
-        elif TTS_ENGINE == "dashscope":
-            # 使用 DashScope CosyVoice
-            from dashscope import audio as dash_audio
-
-            tts_result = dash_audio.speech.call(
-                model="cosyvoice-v1",
-                text=text,
-                sample_rate=24000,
-                format="wav",
-            )
-
-            if hasattr(tts_result, 'get_audio_data'):
-                pcm24 = tts_result.get_audio_data()
-                if pcm24:
-                    pcm8k, _ = audioop.ratecv(pcm24, 2, 1, 24000, 8000, None)
-                    pcm8k = audioop.mul(pcm8k, 2, 0.60)
-                    if pcm8k:
-                        await broadcast_pcm16_realtime(pcm8k)
-                        print(f"[TTS] DashScope TTS 播放完成，音频大小: {len(pcm8k)} 字节")
-                    return
+        # 【Edge-TTS 已移除】不再支持 Edge-TTS 和 DashScope TTS
+        # 如果需要其他 TTS 引擎，请直接在此添加
 
         print(f"[TTS] TTS 合成失败")
 

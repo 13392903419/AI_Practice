@@ -80,6 +80,8 @@ from audio_player import initialize_audio_system, play_voice_text
 from simple_agent import SimpleAgent, AgentRequest
 # ---- 摄像头模块 ----
 from webcam_handler import get_webcam_handler, WebcamHandler
+# ---- 优化模块 ----
+from optimization_processor import get_optimized_processor
 
 # ---- 同步录制器 ----
 import sync_recorder
@@ -105,9 +107,11 @@ RECENT_MAX = 50
 last_frames: Deque[Tuple[float, bytes]] = deque(maxlen=10)
 
 camera_viewers: Set[WebSocket] = set()
-esp32_camera_ws: Optional[WebSocket] = None
+# 【ESP32 已禁用】
+# esp32_camera_ws: Optional[WebSocket] = None
 imu_ws_clients: Set[WebSocket] = set()
-esp32_audio_ws: Optional[WebSocket] = None
+# esp32_audio_ws: Optional[WebSocket] = None
+# 【ESP32 已禁用结束】
 
 # 【新增】盲道导航相关全局变量
 blind_path_navigator = None
@@ -360,10 +364,11 @@ async def full_system_reset(reason: str = ""):
     except Exception:
         pass
 
-    # 5) 通知 ESP32
+    # 5) 通知 ESP32 【ESP32 已禁用】
     try:
-        if esp32_audio_ws and (esp32_audio_ws.client_state == WebSocketState.CONNECTED):
-            await esp32_audio_ws.send_text("RESET")
+        pass
+        # if esp32_audio_ws and (esp32_audio_ws.client_state == WebSocketState.CONNECTED):
+        #     await esp32_audio_ws.send_text("RESET")
     except Exception:
         pass
 
@@ -468,9 +473,13 @@ async def start_ai_with_text_custom(user_text: str):
 
         # 如果是工具调用（不是闲聊），执行后直接返回
         if agent_response.intent and agent_response.intent != "chat":
-            # 播放 Agent 的响应
+            # 播放 Agent 的响应（异步，不阻塞）
             if agent_response.text:
-                play_voice_text(agent_response.text)
+                # 在后台线程中播放 TTS，避免阻塞
+                import threading
+                def play_async():
+                    play_voice_text(agent_response.text)
+                threading.Thread(target=play_async, daemon=True).start()
                 await ui_broadcast_final(f"[Agent] {agent_response.text}")
             return
     except Exception as e:
@@ -890,8 +899,13 @@ async def agent_status():
         "agent_ready": _agent_instance is not None,
         "navigation_state": orchestrator.get_state() if orchestrator else None,
         "yolomedia_running": yolomedia_running,
-        "camera_connected": esp32_camera_ws is not None
+        "camera_connected": False  # 【ESP32 已禁用】
+        # "camera_connected": esp32_camera_ws is not None
     }
+
+
+# ---------- TTS 缓存管理 API 【已移除，使用本地 TTS 无需缓存】----------
+# 本地 TTS (pyttsx3) 不需要缓存管理，相关 API 已删除
 
 # ---------- 电脑摄像头 API ----------
 # 电脑摄像头相关全局变量
@@ -899,8 +913,8 @@ webcam_active = False
 webcam_handler: WebcamHandler = None
 
 def _webcam_frame_processor(frame):
-    """电脑摄像头帧处理函数 - 复用现有导航逻辑"""
-    global orchestrator, yolomedia_running, _infer_busy, _latest_result_img
+    """电脑摄像头帧处理函数 - 使用优化处理器"""
+    global orchestrator, yolomedia_running
 
     # 如果没有 orchestrator，直接返回原始帧
     if orchestrator is None:
@@ -910,43 +924,34 @@ def _webcam_frame_processor(frame):
     if yolomedia_running:
         return frame
 
-    # 如果推理线程忙，跳过处理
-    if _infer_busy:
-        with _latest_result_lock:
-            if _latest_result_img is not None:
-                return _latest_result_img
-        return frame
-
-    # 执行导航处理
-    _infer_busy = True
     try:
         current_state = orchestrator.get_state()
+        processor = get_optimized_processor()
 
-        if current_state == "TRAFFIC_LIGHT_DETECTION":
-            import trafficlight_detection
-            result = trafficlight_detection.process_single_frame(frame)
-            out = result['vis_image'] if result['vis_image'] is not None else frame
+        def process_func(f):
+            """内部处理函数"""
+            if current_state == "TRAFFIC_LIGHT_DETECTION":
+                import trafficlight_detection
+                result = trafficlight_detection.process_single_frame(f)
+                out = result['vis_image'] if result['vis_image'] is not None else f
+                return out, ""
+            else:
+                res = orchestrator.process_frame(f)
+                out = res.annotated_image if res.annotated_image is not None else f
+                # 播放语音
+                if res.guidance_text:
+                    play_voice_text(res.guidance_text)
+                return out, res.guidance_text
 
-            # 播放语音
-            if result.get('voice_text'):
-                play_voice_text(result['voice_text'])
-        else:
-            res = orchestrator.process_frame(frame)
-            out = res.annotated_image if res.annotated_image is not None else frame
+        # 使用优化处理器处理帧
+        result_frame, _ = processor.process_frame_optimized(
+            frame, current_state, process_func
+        )
 
-            # 播放语音
-            if res.guidance_text:
-                play_voice_text(res.guidance_text)
-
-        with _latest_result_lock:
-            _latest_result_img = out
-
-        return out
+        return result_frame if result_frame is not None else frame
     except Exception as e:
         print(f"[WEBCAM] 处理帧失败: {e}")
         return frame
-    finally:
-        _infer_busy = False
 
 @app.post("/api/webcam/start")
 async def start_webcamera(request: dict):
@@ -1141,16 +1146,43 @@ async def stop_test(request: Request):
     output_dir = "test_results"
     video_path = recorder.save_annotated_video(output_dir=output_dir)
     log_path = recorder.save_test_log(output_dir=output_dir)
+    sync_log_path = recorder.save_sync_log(output_dir=output_dir)  # 新增：保存同步日志
 
     return {
         "success": True,
         "results": results,
         "annotated_video": video_path,
-        "test_log": log_path
+        "test_log": log_path,
+        "sync_log": sync_log_path  # 新增：返回同步日志路径
     }
 
 @app.get("/api/test/results/{test_id}")
 async def get_test_results(test_id: str):
+    """获取测试结果"""
+    recorder = test_recorders.get(test_id)
+    if not recorder:
+        return {"error": "测试不存在"}
+
+    return {
+        "test_id": test_id,
+        "summary": recorder.get_summary()
+    }
+
+@app.get("/api/test/sync_log/{test_id}")
+async def get_sync_log(test_id: str):
+    """获取音画同步日志"""
+    import os
+    sync_log_path = os.path.join("test_results", f"{test_id}_sync_log.json")
+
+    if not os.path.exists(sync_log_path):
+        return {"error": "同步日志不存在"}
+
+    try:
+        with open(sync_log_path, "r", encoding="utf-8") as f:
+            sync_data = json.load(f)
+        return sync_data
+    except Exception as e:
+        return {"error": f"读取同步日志失败: {e}"}
     """获取测试结果"""
     recorder = test_recorders.get(test_id)
     if not recorder:
@@ -1221,389 +1253,358 @@ async def ws_ui(ws: WebSocket):
     finally:
         ui_clients.pop(id(ws), None)
 
-# ---------- WebSocket：ESP32 音频入口（ASR 上行） ----------
-@app.websocket("/ws_audio")
-async def ws_audio(ws: WebSocket):
-    global esp32_audio_ws
-    esp32_audio_ws = ws
-    await ws.accept()
-    print("\n[AUDIO] client connected")
-    recognition = None
-    streaming = False
-    last_ts = time.monotonic()
-    keepalive_task: Optional[asyncio.Task] = None
+# ---------- WebSocket：ESP32 音频入口（ASR 上行） 【ESP32 已禁用】----------
+# @app.websocket("/ws_audio")
+# async def ws_audio(ws: WebSocket):
+#     global esp32_audio_ws
+#     esp32_audio_ws = ws
+#     await ws.accept()
+#     print("\n[AUDIO] client connected")
+#     recognition = None
+#     streaming = False
+#     last_ts = time.monotonic()
+#     keepalive_task: Optional[asyncio.Task] = None
 
-    async def stop_rec(send_notice: Optional[str] = None):
-        nonlocal recognition, streaming, keepalive_task
-        if keepalive_task and not keepalive_task.done():
-            keepalive_task.cancel()
-            try: await keepalive_task
-            except Exception: pass
-        keepalive_task = None
-        if recognition:
-            try: recognition.stop()
-            except Exception: pass
-            recognition = None
-        await set_current_recognition(None)
-        streaming = False
-        if send_notice:
-            try: await ws.send_text(send_notice)
-            except Exception: pass
+#     async def stop_rec(send_notice: Optional[str] = None):
+#         nonlocal recognition, streaming, keepalive_task
+#         if keepalive_task and not keepalive_task.done():
+#             keepalive_task.cancel()
+#             try: await keepalive_task
+#             except Exception: pass
+#         keepalive_task = None
+#         if recognition:
+#             try: recognition.stop()
+#             except Exception: pass
+#             recognition = None
+#         await set_current_recognition(None)
+#         streaming = False
+#         if send_notice:
+#             try: await ws.send_text(send_notice)
+#             except Exception: pass
 
-    async def on_sdk_error(_msg: str):
-        await stop_rec(send_notice="RESTART")
+#     async def on_sdk_error(_msg: str):
+#         await stop_rec(send_notice="RESTART")
 
-    async def keepalive_loop():
-        nonlocal last_ts, recognition, streaming
-        try:
-            while streaming and recognition is not None:
-                idle = time.monotonic() - last_ts
-                if idle > 0.35:
-                    try:
-                        for _ in range(30):  # ~600ms 静音
-                            recognition.send_audio_frame(SILENCE_20MS)
-                        last_ts = time.monotonic()
-                    except Exception:
-                        await on_sdk_error("keepalive send failed")
-                        return
-                await asyncio.sleep(0.10)
-        except asyncio.CancelledError:
-            return
+#     async def keepalive_loop():
+#         nonlocal last_ts, recognition, streaming
+#         try:
+#             while streaming and recognition is not None:
+#                 idle = time.monotonic() - last_ts
+#                 if idle > 0.35:
+#                     try:
+#                         for _ in range(30):  # ~600ms 静音
+#                             recognition.send_audio_frame(SILENCE_20MS)
+#                         last_ts = time.monotonic()
+#                     except Exception:
+#                         await on_sdk_error("keepalive send failed")
+#                         return
+#                 await asyncio.sleep(0.10)
+#         except asyncio.CancelledError:
+#             return
 
-    try:
-        while True:
-            if WebSocketState and ws.client_state != WebSocketState.CONNECTED:
-                break
-            try:
-                msg = await ws.receive()
-            except WebSocketDisconnect:
-                break
-            except RuntimeError as e:
-                if "Cannot call \"receive\"" in str(e):
-                    break
-                raise
+#     try:
+#         while True:
+#             if WebSocketState and ws.client_state != WebSocketState.CONNECTED:
+#                 break
+#             try:
+#                 msg = await ws.receive()
+#             except WebSocketDisconnect:
+#                 break
+#             except RuntimeError as e:
+#                 if "Cannot call \"receive\"" in str(e):
+#                     break
+#                 raise
 
-            if "text" in msg and msg["text"] is not None:
-                raw = (msg["text"] or "").strip()
-                cmd = raw.upper()
+#             if "text" in msg and msg["text"] is not None:
+#                 raw = (msg["text"] or "").strip()
+#                 cmd = raw.upper()
 
-                if cmd == "START":
-                    print("[AUDIO] START received")
-                    await stop_rec()
-                    loop = asyncio.get_running_loop()
-                    def post(coro):
-                        asyncio.run_coroutine_threadsafe(coro, loop)
+#                 if cmd == "START":
+#                     print("[AUDIO] START received")
+#                     await stop_rec()
+#                     loop = asyncio.get_running_loop()
+#                     def post(coro):
+#                         asyncio.run_coroutine_threadsafe(coro, loop)
 
                     # 组装 ASR 回调（把依赖都注入）
-                    cb = ASRCallback(
-                        on_sdk_error=lambda s: post(on_sdk_error(s)),
-                        post=post,
-                        ui_broadcast_partial=ui_broadcast_partial,
-                        ui_broadcast_final=ui_broadcast_final,
-                        is_playing_now_fn=is_playing_now,
-                        start_ai_with_text_fn=start_ai_with_text_custom,  # 使用自定义版本
-                        full_system_reset_fn=full_system_reset,
-                        interrupt_lock=interrupt_lock,
-                    )
+#                     cb = ASRCallback(
+#                         on_sdk_error=lambda s: post(on_sdk_error(s)),
+#                         post=post,
+#                         ui_broadcast_partial=ui_broadcast_partial,
+#                         ui_broadcast_final=ui_broadcast_final,
+#                         is_playing_now_fn=is_playing_now,
+#                         start_ai_with_text_fn=start_ai_with_text_custom,  # 使用自定义版本
+#                         full_system_reset_fn=full_system_reset,
+#                         interrupt_lock=interrupt_lock,
+#                     )
 
-                    recognition = dash_audio.asr.Recognition(
-                        api_key=API_KEY, model=MODEL, format=AUDIO_FMT,
-                        sample_rate=SAMPLE_RATE, callback=cb
-                    )
-                    recognition.start()
-                    await set_current_recognition(recognition)
-                    streaming = True
-                    last_ts = time.monotonic()
-                    keepalive_task = asyncio.create_task(keepalive_loop())
-                    await ui_broadcast_partial("（已开始接收音频…）")
-                    await ws.send_text("OK:STARTED")
+#                     recognition = dash_audio.asr.Recognition(
+#                         api_key=API_KEY, model=MODEL, format=AUDIO_FMT,
+#                         sample_rate=SAMPLE_RATE, callback=cb
+#                     )
+#                     recognition.start()
+#                     await set_current_recognition(recognition)
+#                     streaming = True
+#                     last_ts = time.monotonic()
+#                     keepalive_task = asyncio.create_task(keepalive_loop())
+#                     await ui_broadcast_partial("（已开始接收音频…）")
+#                     await ws.send_text("OK:STARTED")
 
-                elif cmd == "STOP":
-                    if recognition:
-                        for _ in range(15):  # ~300ms 静音
-                            try: recognition.send_audio_frame(SILENCE_20MS)
-                            except Exception: break
-                    await stop_rec(send_notice="OK:STOPPED")
+#                 elif cmd == "STOP":
+#                     if recognition:
+#                         for _ in range(15):  # ~300ms 静音
+#                             try: recognition.send_audio_frame(SILENCE_20MS)
+#                             except Exception: break
+#                     await stop_rec(send_notice="OK:STOPPED")
 
-                elif raw.startswith("PROMPT:"):
+#                 elif raw.startswith("PROMPT:"):
                     # 设备端主动发起一轮：同样使用“先硬重置后播放”的强语义
-                    text = raw[len("PROMPT:"):].strip()
-                    if text:
-                        async with interrupt_lock:
-                            await start_ai_with_text_custom(text) # 使用自定义的启动函数
-                        await ws.send_text("OK:PROMPT_ACCEPTED")
-                    else:
-                        await ws.send_text("ERR:EMPTY_PROMPT")
+#                     text = raw[len("PROMPT:"):].strip()
+#                     if text:
+#                         async with interrupt_lock:
+#                             await start_ai_with_text_custom(text) # 使用自定义的启动函数
+#                         await ws.send_text("OK:PROMPT_ACCEPTED")
+#                     else:
+#                         await ws.send_text("ERR:EMPTY_PROMPT")
 
-            elif "bytes" in msg and msg["bytes"] is not None:
-                if streaming and recognition:
-                    try:
-                        recognition.send_audio_frame(msg["bytes"])
-                        last_ts = time.monotonic()
-                    except Exception:
-                        await on_sdk_error("send_audio_frame failed")
+#             elif "bytes" in msg and msg["bytes"] is not None:
+#                 if streaming and recognition:
+#                     try:
+#                         recognition.send_audio_frame(msg["bytes"])
+#                         last_ts = time.monotonic()
+#                     except Exception:
+#                         await on_sdk_error("send_audio_frame failed")
 
-    except Exception as e:
-        print(f"\n[WS ERROR] {e}")
-    finally:
-        await stop_rec()
-        try:
-            if WebSocketState is None or ws.client_state == WebSocketState.CONNECTED:
-                await ws.close(code=1000)
-        except Exception:
-            pass
-        if esp32_audio_ws is ws:
-            esp32_audio_ws = None
-        print("[WS] connection closed")
+#     except Exception as e:
+#         print(f"\n[WS ERROR] {e}")
+#     finally:
+#         await stop_rec()
+#         try:
+#             if WebSocketState is None or ws.client_state == WebSocketState.CONNECTED:
+#                 await ws.close(code=1000)
+#         except Exception:
+#             pass
+#         if esp32_audio_ws is ws:
+#             esp32_audio_ws = None
+#         print("[WS] connection closed")
 
 # ---------- WebSocket：ESP32 相机入口（JPEG 二进制） ----------
 @app.websocket("/ws/camera")
-async def ws_camera_esp(ws: WebSocket):
-    global esp32_camera_ws, blind_path_navigator, cross_street_navigator, cross_street_active, navigation_active, orchestrator
+# async def ws_camera_esp(ws: WebSocket):
+#     global esp32_camera_ws, blind_path_navigator, cross_street_navigator, cross_street_active, navigation_active, orchestrator
     # 允许新连接替换旧连接（手机/ESP32 互切）
-    if esp32_camera_ws is not None:
-        try:
-            await esp32_camera_ws.close(code=1000)
-        except Exception:
-            pass
-        esp32_camera_ws = None
-        print("[CAMERA] 旧连接已断开，切换到新连接")
-    esp32_camera_ws = ws
-    await ws.accept()
-    print("[CAMERA] 相机源已连接")
+#     if esp32_camera_ws is not None:
+#         try:
+#             await esp32_camera_ws.close(code=1000)
+#         except Exception:
+#             pass
+#         esp32_camera_ws = None
+#         print("[CAMERA] 旧连接已断开，切换到新连接")
+#     esp32_camera_ws = ws
+#     await ws.accept()
+#     print("[CAMERA] 相机源已连接")
     
     # 【新增】初始化盲道导航器
-    if blind_path_navigator is None and yolo_seg_model is not None:
-        blind_path_navigator = BlindPathNavigator(yolo_seg_model, obstacle_detector)
-        print("[NAVIGATION] 盲道导航器已初始化")
-    else:
-        if blind_path_navigator is not None:
-            print("[NAVIGATION] 导航器已存在，无需重新初始化")
-        elif yolo_seg_model is None:
-            print("[NAVIGATION] 警告：YOLO模型未加载，无法初始化导航器")
+#     if blind_path_navigator is None and yolo_seg_model is not None:
+#         blind_path_navigator = BlindPathNavigator(yolo_seg_model, obstacle_detector)
+#         print("[NAVIGATION] 盲道导航器已初始化")
+#     else:
+#         if blind_path_navigator is not None:
+#             print("[NAVIGATION] 导航器已存在，无需重新初始化")
+#         elif yolo_seg_model is None:
+#             print("[NAVIGATION] 警告：YOLO模型未加载，无法初始化导航器")
     
     # 【新增】初始化过马路导航器
-    if cross_street_navigator is None:
-        if yolo_seg_model:
-            cross_street_navigator = CrossStreetNavigator(
-                seg_model=yolo_seg_model,
-                coco_model=None,  # 不使用交通灯检测
-                obs_model=None    # 暂时也不用障碍物检测，让它更快
-            )
-            print("[CROSS_STREET] 过马路导航器已初始化（简化版 - 仅斑马线检测）")
-        else:
-            print("[CROSS_STREET] 错误：缺少分割模型，无法初始化过马路导航器")
+#     if cross_street_navigator is None:
+#         if yolo_seg_model:
+#             cross_street_navigator = CrossStreetNavigator(
+#                 seg_model=yolo_seg_model,
+#                 coco_model=None,  # 不使用交通灯检测
+#                 obs_model=None    # 暂时也不用障碍物检测，让它更快
+#             )
+#             print("[CROSS_STREET] 过马路导航器已初始化（简化版 - 仅斑马线检测）")
+#         else:
+#             print("[CROSS_STREET] 错误：缺少分割模型，无法初始化过马路导航器")
             
-            if not yolo_seg_model:
-                print("[CROSS_STREET] - 缺少分割模型 (yolo_seg_model)")
-            if not obstacle_detector:
-                print("[CROSS_STREET] - 缺少障碍物检测器 (obstacle_detector)")
+#             if not yolo_seg_model:
+#                 print("[CROSS_STREET] - 缺少分割模型 (yolo_seg_model)")
+#             if not obstacle_detector:
+#                 print("[CROSS_STREET] - 缺少障碍物检测器 (obstacle_detector)")
     
-    if orchestrator is None and blind_path_navigator is not None and cross_street_navigator is not None:
-        orchestrator = NavigationMaster(blind_path_navigator, cross_street_navigator)
-        print("[NAV MASTER] 统领状态机已初始化（托管模式）")
-    frame_counter = 0  # 添加帧计数器
+#     if orchestrator is None and blind_path_navigator is not None and cross_street_navigator is not None:
+#         orchestrator = NavigationMaster(blind_path_navigator, cross_street_navigator)
+#         print("[NAV MASTER] 统领状态机已初始化（托管模式）")
+#     frame_counter = 0  # 添加帧计数器
     
-    try:
-        while True:
-            msg = await ws.receive()
-            if "bytes" in msg and msg["bytes"] is not None:
-                data = msg["bytes"]
-                frame_counter += 1
+#     try:
+#         while True:
+#             msg = await ws.receive()
+#             if "bytes" in msg and msg["bytes"] is not None:
+#                 data = msg["bytes"]
+#                 frame_counter += 1
                 
                 # 【新增】录制原始帧
-                try:
-                    sync_recorder.record_frame(data)
-                except Exception as e:
-                    if frame_counter % 100 == 0:  # 避免日志刷屏
-                        print(f"[RECORDER] 录制帧失败: {e}")
+#                 try:
+#                     sync_recorder.record_frame(data)
+#                 except Exception as e:
+#                     if frame_counter % 100 == 0:  # 避免日志刷屏
+#                         print(f"[RECORDER] 录制帧失败: {e}")
                 
-                try:
-                    last_frames.append((time.time(), data))
-                except Exception:
-                    pass
+#                 try:
+#                     last_frames.append((time.time(), data))
+#                 except Exception:
+#                     pass
                 
                 # 推送到bridge_io（供yolomedia使用）
-                bridge_io.push_raw_jpeg(data)
+#                 bridge_io.push_raw_jpeg(data)
                 
                 # 【调试】检查导航条件
-                if frame_counter % 30 == 0:  # 每30帧输出一次
-                    state_dbg = orchestrator.get_state() if orchestrator else "N/A"
-                    print(f"[NAVIGATION DEBUG] 帧:{frame_counter}, state={state_dbg}, yolomedia_running={yolomedia_running}")
+#                 if frame_counter % 30 == 0:  # 每30帧输出一次
+#                     state_dbg = orchestrator.get_state() if orchestrator else "N/A"
+#                     print(f"[NAVIGATION DEBUG] 帧:{frame_counter}, state={state_dbg}, yolomedia_running={yolomedia_running}")
                 
                 # 统一解码（添加更严格的异常处理）
-                try:
-                    arr = np.frombuffer(data, dtype=np.uint8)
-                    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+#                 try:
+#                     arr = np.frombuffer(data, dtype=np.uint8)
+#                     bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
                     # 验证解码结果
-                    if bgr is None or bgr.size == 0:
-                        if frame_counter % 30 == 0:
-                            print(f"[JPEG] 解码失败：数据长度={len(data)}")
-                        bgr = None
-                except Exception as e:
-                    if frame_counter % 30 == 0:
-                        print(f"[JPEG] 解码异常: {e}")
-                    bgr = None
+#                     if bgr is None or bgr.size == 0:
+#                         if frame_counter % 30 == 0:
+#                             print(f"[JPEG] 解码失败：数据长度={len(data)}")
+#                         bgr = None
+#                 except Exception as e:
+#                     if frame_counter % 30 == 0:
+#                         print(f"[JPEG] 解码异常: {e}")
+#                     bgr = None
 
                 # 【托管】优先交给统领状态机（寻物未占用画面时）
                 # 【修改】找物品模式时不执行导航处理，让yolomedia接管画面
-                if orchestrator and not yolomedia_running and bgr is not None:
-                    current_state = orchestrator.get_state()
+#                 if orchestrator and not yolomedia_running and bgr is not None:
+#                     current_state = orchestrator.get_state()
                     
                     # 【新增】找物品模式：不处理画面，等待yolomedia发送处理后的帧
-                    if current_state == "ITEM_SEARCH":
+#                     if current_state == "ITEM_SEARCH":
                         # 找物品模式下，如果yolomedia还没开始发送帧，先显示原始画面
-                        if not yolomedia_sending_frames and camera_viewers:
-                            ok, enc = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-                            if ok:
-                                jpeg_data = enc.tobytes()
-                                dead = []
-                                for viewer_ws in list(camera_viewers):
-                                    try:
-                                        await viewer_ws.send_bytes(jpeg_data)
-                                    except Exception:
-                                        dead.append(viewer_ws)
-                                for d in dead:
-                                    camera_viewers.discard(d)
-                        continue  # 跳过后续的导航处理
+#                         if not yolomedia_sending_frames and camera_viewers:
+#                             ok, enc = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+#                             if ok:
+#                                 jpeg_data = enc.tobytes()
+#                                 dead = []
+#                                 for viewer_ws in list(camera_viewers):
+#                                     try:
+#                                         await viewer_ws.send_bytes(jpeg_data)
+#                                     except Exception:
+#                                         dead.append(viewer_ws)
+#                                 for d in dead:
+#                                     camera_viewers.discard(d)
+#                         continue  # 跳过后续的导航处理
                     
-                    # ====== 异步推理：不阻塞 WebSocket 接收 ======
-                    global _infer_busy, _latest_result_img
+                    # ====== 优化处理：同步 + 跳帧 + 降分辨率 ======
+                    # 使用优化处理器代替异步推理，避免闪回和延迟
+#                     processor = get_optimized_processor()
 
-                    if not _infer_busy:
-                        # GPU 空闲 → 提交本帧推理
-                        _infer_busy = True
-                        loop = asyncio.get_event_loop()
+#                     def process_func(frame):
+#                         """内部处理函数"""
+#                         if current_state == "TRAFFIC_LIGHT_DETECTION":
+#                             import trafficlight_detection
+#                             result = trafficlight_detection.process_single_frame(frame, ui_broadcast_callback=ui_broadcast_final)
+#                             out = result["vis_image"] if result["vis_image"] is not None else frame
+#                             return out, ""
+#                         else:
+#                             res = orchestrator.process_frame(frame)
+#                             out = res.annotated_image if res.annotated_image is not None else frame
+#                             return out, res.guidance_text
 
-                        def _sync_infer(frame, state):
-                            """在线程池中同步执行推理，结束后释放忙标志。"""
-                            global _infer_busy, _latest_result_img
-                            out = frame
-                            guidance = None
-                            try:
-                                if state == "TRAFFIC_LIGHT_DETECTION":
-                                    import trafficlight_detection
-                                    result = trafficlight_detection.process_single_frame(frame, ui_broadcast_callback=ui_broadcast_final)
-                                    out = result['vis_image'] if result['vis_image'] is not None else frame
-                                else:
-                                    res = orchestrator.process_frame(frame)
-                                    guidance = res.guidance_text
-                                    out = res.annotated_image if res.annotated_image is not None else frame
-                            except Exception as e:
-                                print(f"[INFER] 推理出错: {e}")
-                            finally:
-                                with _latest_result_lock:
-                                    _latest_result_img = out
-                                _infer_busy = False
-                            return out, guidance
+                    # 同步优化处理
+#                     result_frame, guidance = processor.process_frame_optimized(
+#                         bgr, current_state, process_func
+#                     )
 
-                        def _on_infer_done(fut):
-                            """推理完成的回调：播放语音并广播最新结果帧给前端。"""
-                            try:
-                                out_img, guidance = fut.result()
-                            except Exception:
-                                return
-                            if guidance:
-                                try:
-                                    play_voice_text(guidance)
-                                    asyncio.run_coroutine_threadsafe(
-                                        ui_broadcast_final(f"[导航] {guidance}"), loop
-                                    )
-                                except Exception:
-                                    pass
+                    # 记录测试数据
+#                     recorder = get_test_recorder()
+#                     is_recording = recorder and recorder._is_recording
 
-                            # 【新增】记录测试数据
-                            recorder = get_test_recorder()
-                            if recorder and recorder._is_recording:
-                                try:
-                                    recorder.record_frame(
-                                        original_frame=bgr,
-                                        annotated_frame=out_img,
-                                        navigation_state=orchestrator.get_state() if orchestrator else "",
-                                        guidance_text=guidance or ""
-                                    )
-                                except Exception as e:
-                                    print(f"[TEST_RECORDER] 记录帧失败: {e}")
+#                     if is_recording and result_frame is not None:
+#                         try:
+#                             recorder.record_frame(
+#                                 original_frame=bgr,
+#                                 annotated_frame=result_frame,
+#                                 navigation_state=current_state,
+#                                 guidance_text=guidance or ""
+#                             )
+#                             if guidance:
+#                                 recorder.record_guidance(guidance)
+#                         except Exception as e:
+#                             print(f"[TEST_RECORDER] 记录帧失败: {e}")
 
-                            # 广播推理结果帧
-                            if camera_viewers and out_img is not None:
-                                try:
-                                    ok, enc = cv2.imencode(".jpg", out_img, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-                                    if ok:
-                                        jpeg_data = enc.tobytes()
-                                        for viewer_ws in list(camera_viewers):
-                                            asyncio.run_coroutine_threadsafe(
-                                                viewer_ws.send_bytes(jpeg_data), loop
-                                            )
-                                except Exception:
-                                    pass
+                    # 播放语音（非录制模式）
+#                     if not is_recording and guidance:
+#                         try:
+#                             play_voice_text(guidance)
+#                             await ui_broadcast_final(f"[导航] {guidance}")
+#                         except Exception:
+#                             pass
 
-                        fut = _infer_executor.submit(_sync_infer, bgr.copy(), current_state)
-                        fut.add_done_callback(_on_infer_done)
-                    else:
-                        # GPU 忙 → 跳过推理，把最新缓存的结果帧发给前端（保持流畅）
-                        with _latest_result_lock:
-                            cached = _latest_result_img
-                        show_img = cached if cached is not None else bgr
-                        if camera_viewers:
-                            ok, enc = cv2.imencode(".jpg", show_img, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-                            if ok:
-                                jpeg_data = enc.tobytes()
-                                dead = []
-                                for viewer_ws in list(camera_viewers):
-                                    try:
-                                        await viewer_ws.send_bytes(jpeg_data)
-                                    except Exception:
-                                        dead.append(viewer_ws)
-                                for d in dead:
-                                    camera_viewers.discard(d)
+                    # 发送处理结果帧
+#                     if camera_viewers and result_frame is not None:
+#                         ok, enc = cv2.imencode(".jpg", result_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+#                         if ok:
+#                             jpeg_data = enc.tobytes()
+#                             dead = []
+#                             for viewer_ws in list(camera_viewers):
+#                                 try:
+#                                     await viewer_ws.send_bytes(jpeg_data)
+#                                 except Exception:
+#                                     dead.append(viewer_ws)
+#                             for d in dead:
+#                                 camera_viewers.discard(d)
+
                     # 已托管，进入下一帧
-                    continue
-
+#                     continue
                 # 【回退】寻物占用或者未解码成功，按原始画面回传
-                if not yolomedia_sending_frames and camera_viewers:
-                    try:
-                        if bgr is None:
-                            arr = np.frombuffer(data, dtype=np.uint8)
-                            bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                        if bgr is not None:
-                            ok, enc = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-                            if ok:
-                                jpeg_data = enc.tobytes()
-                                dead = []
-                                for viewer_ws in list(camera_viewers):
-                                    try:
-                                        await viewer_ws.send_bytes(jpeg_data)
-                                    except Exception:
-                                        dead.append(viewer_ws)
-                                for ws in dead:
-                                    camera_viewers.discard(ws)
-                    except Exception as e:
-                        print(f"[CAMERA] Broadcast error: {e}")
+#                 if not yolomedia_sending_frames and camera_viewers:
+#                     try:
+#                         if bgr is None:
+#                             arr = np.frombuffer(data, dtype=np.uint8)
+#                             bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+#                         if bgr is not None:
+#                             ok, enc = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+#                             if ok:
+#                                 jpeg_data = enc.tobytes()
+#                                 dead = []
+#                                 for viewer_ws in list(camera_viewers):
+#                                     try:
+#                                         await viewer_ws.send_bytes(jpeg_data)
+#                                     except Exception:
+#                                         dead.append(viewer_ws)
+#                                 for ws in dead:
+#                                     camera_viewers.discard(ws)
+#                     except Exception as e:
+#                         print(f"[CAMERA] Broadcast error: {e}")
 
-            elif "type" in msg and msg["type"] in ("websocket.close", "websocket.disconnect"):
-                break
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        print(f"[CAMERA ERROR] {e}")
-    finally:
-        try:
-            if WebSocketState is None or ws.client_state == WebSocketState.CONNECTED:
-                await ws.close(code=1000)
-        except Exception:
-            pass
-        esp32_camera_ws = None
-        print("[CAMERA] ESP32 disconnected")
+#             elif "type" in msg and msg["type"] in ("websocket.close", "websocket.disconnect"):
+#                 break
+#     except WebSocketDisconnect:
+#         pass
+#     except Exception as e:
+#         print(f"[CAMERA ERROR] {e}")
+#     finally:
+#         try:
+#             if WebSocketState is None or ws.client_state == WebSocketState.CONNECTED:
+#                 await ws.close(code=1000)
+#         except Exception:
+#             pass
+#         esp32_camera_ws = None
+#         print("[CAMERA] ESP32 disconnected")
         
         # 【新增】清理导航状态
-        if blind_path_navigator:
-            blind_path_navigator.reset()
-        if cross_street_navigator:
-            cross_street_navigator.reset()
-        if orchestrator:
-            orchestrator.reset()
-            print("[NAV MASTER] 统领器已重置")
+#         if blind_path_navigator:
+#             blind_path_navigator.reset()
+#         if cross_street_navigator:
+#             cross_street_navigator.reset()
+#         if orchestrator:
+#             orchestrator.reset()
+#             print("[NAV MASTER] 统领器已重置")
 
 # ---------- WebSocket：浏览器订阅相机帧 ----------
 @app.websocket("/ws/viewer")
@@ -1634,6 +1635,12 @@ async def ws_test_camera(ws: WebSocket):
     test_camera_ws = ws
     await ws.accept()
     print("[TEST_CAMERA] 视频测试相机连接")
+
+    # 【新增】测试页面连接时，暂时关闭电脑摄像头的广播
+    global webcam_active, webcam_handler
+    if webcam_active and webcam_handler:
+        print("[TEST_CAMERA] 暂停电脑摄像头广播，避免冲突")
+        webcam_active = False
 
     # 初始化导航器（如果还没初始化）
     global blind_path_navigator, cross_street_navigator, orchestrator
@@ -1726,77 +1733,53 @@ async def ws_test_camera(ws: WebSocket):
 
                                     def _sync_infer(frame, state):
                                         """在线程池中同步执行推理"""
-                                        global _infer_busy, _latest_result_img
-                                        out = frame
-                                        guidance = None
-                                        try:
-                                            if state == "TRAFFIC_LIGHT_DETECTION":
-                                                import trafficlight_detection
-                                                result = trafficlight_detection.process_single_frame(frame, ui_broadcast_callback=ui_broadcast_final)
-                                                out = result['vis_image'] if result['vis_image'] is not None else frame
-                                            else:
-                                                res = orchestrator.process_frame(frame)
-                                                guidance = res.guidance_text
-                                                out = res.annotated_image if res.annotated_image is not None else frame
-                                        except Exception as e:
-                                            print(f"[TEST_CAMERA] 推理出错: {e}")
-                                        finally:
-                                            with _latest_result_lock:
-                                                _latest_result_img = out
-                                            _infer_busy = False
-                                        return out, guidance
+                                # ====== 优化处理：同步 + 跳帧 + 降分辨率 ======
+                                processor = get_optimized_processor()
 
-                                    def _on_infer_done(fut):
-                                        """推理完成回调"""
-                                        try:
-                                            out_img, guidance = fut.result()
-                                        except Exception:
-                                            return
+                                def process_func(frame):
+                                    """内部处理函数"""
+                                    if current_state == "TRAFFIC_LIGHT_DETECTION":
+                                        import trafficlight_detection
+                                        result = trafficlight_detection.process_single_frame(frame, ui_broadcast_callback=ui_broadcast_final)
+                                        out = result["vis_image"] if result["vis_image"] is not None else frame
+                                        return out, ""
+                                    else:
+                                        res = orchestrator.process_frame(frame)
+                                        out = res.annotated_image if res.annotated_image is not None else frame
+                                        return out, res.guidance_text
 
-                                        # 记录测试数据
-                                        recorder = get_test_recorder()
-                                        if recorder and recorder._is_recording:
-                                            try:
-                                                recorder.record_frame(
-                                                    original_frame=bgr,
-                                                    annotated_frame=out_img,
-                                                    navigation_state=orchestrator.get_state() if orchestrator else "",
-                                                    guidance_text=guidance or ""
-                                                )
-                                            except Exception as e:
-                                                print(f"[TEST_CAMERA] 记录帧失败: {e}")
+                                # 同步优化处理
+                                result_frame, guidance = processor.process_frame_optimized(
+                                    bgr, current_state, process_func
+                                )
 
-                                        # 播放语音
-                                        if guidance:
-                                            try:
-                                                play_voice_text(guidance)
-                                                asyncio.run_coroutine_threadsafe(
-                                                    ui_broadcast_final(f"[导航] {guidance}"), loop
-                                                )
-                                            except Exception:
-                                                pass
+                                # 记录测试数据
+                                recorder = get_test_recorder()
+                                is_recording = recorder and recorder._is_recording
 
-                                        # 发送处理后的帧回前端
-                                        if out_img is not None:
-                                            try:
-                                                ok, enc = cv2.imencode(".jpg", out_img, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-                                                if ok:
-                                                    jpeg_data = enc.tobytes()
-                                                    asyncio.run_coroutine_threadsafe(
-                                                        ws.send_bytes(jpeg_data), loop
-                                                    )
-                                            except Exception:
-                                                pass
-
-                                    fut = _infer_executor.submit(_sync_infer, bgr.copy(), current_state)
-                                    fut.add_done_callback(_on_infer_done)
-                                else:
-                                    # GPU忙，发送缓存的帧
-                                    with _latest_result_lock:
-                                        cached = _latest_result_img
-                                    show_img = cached if cached is not None else bgr
+                                if is_recording and result_frame is not None:
                                     try:
-                                        ok, enc = cv2.imencode(".jpg", show_img, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+                                        recorder.record_frame(
+                                            original_frame=bgr,
+                                            annotated_frame=result_frame,
+                                            navigation_state=current_state,
+                                            guidance_text=guidance or ""
+                                        )
+                                    except Exception as e:
+                                        print(f"[TEST_CAMERA] 记录帧失败: {e}")
+
+                                # 播放语音（非录制模式）
+                                if not is_recording and guidance:
+                                    try:
+                                        play_voice_text(guidance)
+                                        await ui_broadcast_final(f"[导航] {guidance}")
+                                    except Exception:
+                                        pass
+
+                                # 发送处理后的帧回前端
+                                if result_frame is not None:
+                                    try:
+                                        ok, enc = cv2.imencode(".jpg", result_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
                                         if ok:
                                             jpeg_data = enc.tobytes()
                                             await ws.send_bytes(jpeg_data)
@@ -1820,6 +1803,9 @@ async def ws_test_camera(ws: WebSocket):
         except Exception:
             pass
         test_camera_ws = None
+
+        # 【新增】测试页面断开时，如果之前有电脑摄像头在运行，可以恢复
+        # 但为了避免自动恢复造成混乱，这里暂时不自动恢复
         print("[TEST_CAMERA] 视频测试相机断开")
 
 # ---------- WebSocket：浏览器订阅 IMU ----------
