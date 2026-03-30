@@ -7,6 +7,7 @@
   const $partial   = document.getElementById('partial');
   const $finalList = document.getElementById('finalList');
   const $btnClear  = document.getElementById('btnClear');
+  const $btnWebcam = document.getElementById('btnWebcam');
   const $btnRe     = document.getElementById('btnReconnect');
   const $fps       = document.getElementById('fps');
   const canvas     = document.getElementById('canvas');
@@ -312,15 +313,100 @@
     }
   }
 
-  $btnClear.onclick = ()=> { 
+  $btnClear.onclick = () => {
     const container = ensureChatContainer();
     // 清空聊天记录
     const messages = container.querySelectorAll('.message, .timestamp');
     messages.forEach(msg => msg.remove());
     lastTimestamp = 0; // 重置时间戳计数
   };
+
+  // 电脑摄像头控制
+  let webcamActive = false;
+  $btnWebcam.onclick = async () => {
+    if (webcamActive) {
+      // 停止摄像头
+      try {
+        const res = await fetch('/api/webcam/stop', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          webcamActive = false;
+          $btnWebcam.textContent = '电脑摄像头';
+          $btnWebcam.classList.remove('primary');
+          $btnWebcam.classList.add('ghost');
+          $camStatus.textContent = 'Camera: 已停止';
+          $camStatus.classList.remove('ok');
+          console.log('[Webcam] 已停止');
+        }
+      } catch (e) {
+        console.error('[Webcam] 停止失败:', e);
+      }
+    } else {
+      // 启动摄像头
+      try {
+        const res = await fetch('/api/webcam/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ camera_id: 0, width: 640, height: 480 })
+        });
+        const data = await res.json();
+        if (data.success) {
+          webcamActive = true;
+          $btnWebcam.textContent = '停止摄像头';
+          $btnWebcam.classList.remove('ghost');
+          $btnWebcam.classList.add('primary');
+          $camStatus.textContent = 'Camera: 电脑摄像头';
+          $camStatus.classList.add('ok');
+          document.getElementById('canvasHint').style.display = 'none';
+          console.log('[Webcam] 已启动:', data.camera_info);
+        } else {
+          console.error('[Webcam] 启动失败:', data.error);
+          alert('启动摄像头失败: ' + (data.error || '未知错误'));
+        }
+      } catch (e) {
+        console.error('[Webcam] 启动失败:', e);
+        alert('启动摄像头失败: ' + e.message);
+      }
+    }
+  };
+
   $btnRe.onclick    = ()=> { connectCamera(); connectASR(); };
 
-  connectCamera();
+  // 默认启动电脑摄像头（不等待 ESP32）
+  async function initDefaultCamera() {
+    try {
+      // 先连接 viewer WebSocket（这样才能接收摄像头帧）
+      connectCamera();
+
+      // 等待一小段时间确保 WebSocket 连接建立
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      const res = await fetch('/api/webcam/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ camera_id: 0, width: 640, height: 480 })
+      });
+      const data = await res.json();
+      if (data.success) {
+        webcamActive = true;
+        $btnWebcam.textContent = '停止摄像头';
+        $btnWebcam.classList.remove('ghost');
+        $btnWebcam.classList.add('primary');
+        $camStatus.textContent = 'Camera: 电脑摄像头';
+        $camStatus.classList.add('ok');
+        document.getElementById('canvasHint').style.display = 'none';
+        console.log('[Webcam] 默认摄像头已启动:', data.camera_info);
+      } else {
+        console.warn('[Webcam] 启动失败，等待手动启动:', data.error);
+        $camStatus.textContent = 'Camera: 点击"电脑摄像头"启动';
+      }
+    } catch (e) {
+      console.warn('[Webcam] 自动启动失败:', e);
+      $camStatus.textContent = 'Camera: 点击"电脑摄像头"启动';
+    }
+  }
+
+  // 页面加载时：启动电脑摄像头 + 连接 ASR
+  initDefaultCamera();
   connectASR();
 })();

@@ -322,7 +322,7 @@
   <section class="stage">
     <div class="canvas-wrap">
       <canvas id="canvas"></canvas>
-      <div id="canvasHint" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:16px;pointer-events:none;text-align:center;padding:20px">📷 等待 ESP32 摄像头连接…</div>
+      <div id="canvasHint" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:16px;pointer-events:none;text-align:center;padding:20px">📷 正在启动电脑摄像头…</div>
     </div>
 
     <!-- 右上角状态浮窗 -->
@@ -341,8 +341,9 @@
         <span class="page-subtitle">智能语音交互</span>
       </div>
       <div class="controls">
+        <button class="ghost" id="btnWebcam">电脑摄像头</button>
         <button class="ghost" id="btnClear">清空记录</button>
-        <button class="primary" id="btnReconnect">重新连接</button>
+        <button class="ghost" id="btnReconnect">连接 ESP32</button>
       </div>
     </div>
 

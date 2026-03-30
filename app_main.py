@@ -76,6 +76,10 @@ from asr_core import (
     stop_current_recognition,
 )
 from audio_player import initialize_audio_system, play_voice_text
+# ---- Agent 模块 ----
+from simple_agent import SimpleAgent, AgentRequest
+# ---- 摄像头模块 ----
+from webcam_handler import get_webcam_handler, WebcamHandler
 
 # ---- 同步录制器 ----
 import sync_recorder
@@ -417,12 +421,64 @@ def stop_yolomedia():
         # 只清理标志位即可
         print("[YOLOMEDIA] Worker stopped, 等待状态切换.", flush=True)
 
-# ========= 自定义的 start_ai_with_text，支持识别特殊命令 =========
+# ========= 自定义的 start_ai_with_text，支持识别特殊命令 ==========
+# 全局变量：Chat 模式是否启用
+chat_mode_enabled = False
+
 async def start_ai_with_text_custom(user_text: str):
     """扩展版的AI启动函数，支持识别特殊命令"""
-    global navigation_active, blind_path_navigator, cross_street_active, cross_street_navigator, orchestrator
-    
-    # 【修改】在导航模式和红绿灯检测模式下，只有特定词才进入omni对话
+    global navigation_active, blind_path_navigator, cross_street_active, cross_street_navigator, orchestrator, chat_mode_enabled
+
+    # ========== 【过滤循环】过滤 Agent 响应，避免 TTS 被重新识别 ==========
+    agent_response_patterns = ["已记录目的地", "已保存偏好", "已启动", "已停止", "正在帮您", "准备", "检测到"]
+    if any(user_text.startswith(pattern) for pattern in agent_response_patterns):
+        print(f"[FILTER] 过滤 Agent 响应: {user_text}")
+        return
+
+    # ========== 【热词控制】Chat 模式开关 ==========
+    if "小慧小慧启动" in user_text or "小慧启动" in user_text:
+        chat_mode_enabled = True
+        play_voice_text("对话模式已开启")
+        await ui_broadcast_final("[系统] 对话模式已开启，现在可以和我聊天了")
+        return
+
+    if "小慧小慧停止" in user_text or "小慧停止" in user_text:
+        chat_mode_enabled = False
+        play_voice_text("对话模式已关闭")
+        await ui_broadcast_final("[系统] 对话模式已关闭，只响应导航命令")
+        return
+
+    # ========== 【Agent 意图识别】 ==========
+    try:
+        agent = get_agent_instance()
+        from simple_agent import AgentRequest
+
+        # 确保 orchestrator 已初始化
+        global orchestrator
+        if orchestrator is None:
+            print("[AGENT] orchestrator 未初始化，跳过 Agent 处理")
+        else:
+            # 传递 orchestrator 给 Agent
+            agent.tool_executor.set_nav_master(orchestrator)
+
+        agent_request = AgentRequest(user_input=user_text, input_type="voice")
+        agent_response = await agent.process(agent_request)
+
+        print(f"[AGENT] 意图={agent_response.intent}, 响应={agent_response.text}")
+
+        # 如果是工具调用（不是闲聊），执行后直接返回
+        if agent_response.intent and agent_response.intent != "chat":
+            # 播放 Agent 的响应
+            if agent_response.text:
+                play_voice_text(agent_response.text)
+                await ui_broadcast_final(f"[Agent] {agent_response.text}")
+            return
+    except Exception as e:
+        import traceback
+        print(f"[AGENT] 处理失败: {e}")
+        traceback.print_exc()
+
+    # 【修改】在导航模式下，检查是否允许进入 chat 模式
     if orchestrator:
         current_state = orchestrator.get_state()
         # 如果在导航模式或红绿灯检测模式（非CHAT模式, 非Item_Search模式）
@@ -430,18 +486,18 @@ async def start_ai_with_text_custom(user_text: str):
             # 检查是否是允许的对话触发词
             allowed_keywords = ["帮我看", "帮我看下", "帮我找", "找一下", "看看", "识别一下"]
             is_allowed_query = any(keyword in user_text for keyword in allowed_keywords)
-            
+
             # 检查是否是导航控制命令
-            nav_control_keywords = ["开始过马路", "过马路结束", "开始导航", "盲道导航", "停止导航", "结束导航", 
+            nav_control_keywords = ["开始过马路", "过马路结束", "开始导航", "盲道导航", "停止导航", "结束导航",
                                    "检测红绿灯", "看红绿灯", "停止检测", "停止红绿灯","拿到了","找到了"]
             is_nav_control = any(keyword in user_text for keyword in nav_control_keywords)
-            
+
             # 如果既不是允许的查询，也不是导航控制命令，则丢弃
             if not is_allowed_query and not is_nav_control:
                 mode_name = "红绿灯检测" if current_state == "TRAFFIC_LIGHT_DETECTION" else "导航"
                 print(f"[{mode_name}模式] 丢弃非对话语音: {user_text}")
                 return  # 直接丢弃，不进入omni
-    
+
     # 【修改】检查是否是过马路相关命令 - 使用orchestrator控制
     if "开始过马路" in user_text or "帮我过马路" in user_text:
         # 【新增】如果正在找物品，先停止
@@ -592,7 +648,13 @@ async def start_ai_with_text_custom(user_text: str):
             await ui_broadcast_final("[找物品] 已找到物品。")
         
         return
-    
+
+    # ========== 【Omni 对话入口】只有 chat_mode_enabled 时才进入 ==========
+    if not chat_mode_enabled:
+        print(f"[CHAT] Chat 模式未启用，跳过 Omni 对话: {user_text}")
+        await ui_broadcast_final(f"[系统] 已识别: {user_text}（说'小慧小慧启动'开启对话模式）")
+        return
+
     # 【修改】omni对话开始时，切换到CHAT模式
     global omni_conversation_active, omni_previous_nav_state
     omni_conversation_active = True
@@ -726,6 +788,283 @@ def root():
 @app.get("/api/health", response_class=PlainTextResponse)
 def health():
     return "OK"
+
+# ---------- Agent API ----------
+# 全局 Agent 单例
+_agent_instance: SimpleAgent = None
+
+def get_agent_instance() -> SimpleAgent:
+    """获取 Agent 单例"""
+    global _agent_instance
+    if _agent_instance is None:
+        _agent_instance = SimpleAgent()
+    return _agent_instance
+
+@app.post("/api/agent/chat")
+async def agent_chat(request: dict):
+    """
+    Agent 对话入口
+    请求格式:
+    {
+        "input": "用户输入文本",
+        "type": "text"  # 可选，默认 "text"
+    }
+    """
+    user_input = request.get("input", "")
+    input_type = request.get("type", "text")
+
+    if not user_input:
+        return {"error": "缺少输入"}
+
+    try:
+        agent = get_agent_instance()
+        agent_request = AgentRequest(
+            user_input=user_input,
+            input_type=input_type
+        )
+        response = await agent.process(agent_request)
+
+        return {
+            "success": True,
+            "response": response.text,
+            "intent": response.intent,
+            "tool_used": response.tool_used,
+            "state": response.state
+        }
+    except Exception as e:
+        print(f"[AGENT] Error: {e}")
+        return {"error": str(e)}
+
+@app.post("/api/agent/command")
+async def agent_command(request: dict):
+    """
+    Agent 命令模式 - 直接执行导航命令
+    请求格式:
+    {
+        "command": "start_blindpath" | "stop_navigation" | "start_crossing" | "find_item"
+        "params": {}  # 可选参数
+    }
+    """
+    command = request.get("command", "")
+    params = request.get("params", {})
+
+    if not command:
+        return {"error": "缺少命令"}
+
+    try:
+        global orchestrator
+
+        if not orchestrator:
+            return {"error": "导航系统未就绪"}
+
+        # 命令映射
+        command_map = {
+            "start_blindpath": lambda: orchestrator.start_blind_path_navigation(),
+            "stop_navigation": lambda: orchestrator.stop_navigation(),
+            "start_crossing": lambda: orchestrator.start_crossing(),
+            "find_item": lambda: orchestrator.start_item_search(),
+            "traffic_light": lambda: orchestrator.start_traffic_light_detection(),
+        }
+
+        if command not in command_map:
+            return {"error": f"未知命令: {command}"}
+
+        # 执行命令
+        command_map[command]()
+
+        return {
+            "success": True,
+            "message": f"命令 {command} 已执行",
+            "state": orchestrator.get_state()
+        }
+    except Exception as e:
+        print(f"[AGENT COMMAND] Error: {e}")
+        return {"error": str(e)}
+
+@app.get("/api/agent/status")
+async def agent_status():
+    """获取 Agent 和导航系统状态"""
+    global orchestrator, yolomedia_running
+
+    return {
+        "agent_ready": _agent_instance is not None,
+        "navigation_state": orchestrator.get_state() if orchestrator else None,
+        "yolomedia_running": yolomedia_running,
+        "camera_connected": esp32_camera_ws is not None
+    }
+
+# ---------- 电脑摄像头 API ----------
+# 电脑摄像头相关全局变量
+webcam_active = False
+webcam_handler: WebcamHandler = None
+
+def _webcam_frame_processor(frame):
+    """电脑摄像头帧处理函数 - 复用现有导航逻辑"""
+    global orchestrator, yolomedia_running, _infer_busy, _latest_result_img
+
+    # 如果没有 orchestrator，直接返回原始帧
+    if orchestrator is None:
+        return frame
+
+    # 如果 yolomedia 正在运行，不处理
+    if yolomedia_running:
+        return frame
+
+    # 如果推理线程忙，跳过处理
+    if _infer_busy:
+        with _latest_result_lock:
+            if _latest_result_img is not None:
+                return _latest_result_img
+        return frame
+
+    # 执行导航处理
+    _infer_busy = True
+    try:
+        current_state = orchestrator.get_state()
+
+        if current_state == "TRAFFIC_LIGHT_DETECTION":
+            import trafficlight_detection
+            result = trafficlight_detection.process_single_frame(frame)
+            out = result['vis_image'] if result['vis_image'] is not None else frame
+
+            # 播放语音
+            if result.get('voice_text'):
+                play_voice_text(result['voice_text'])
+        else:
+            res = orchestrator.process_frame(frame)
+            out = res.annotated_image if res.annotated_image is not None else frame
+
+            # 播放语音
+            if res.guidance_text:
+                play_voice_text(res.guidance_text)
+
+        with _latest_result_lock:
+            _latest_result_img = out
+
+        return out
+    except Exception as e:
+        print(f"[WEBCAM] 处理帧失败: {e}")
+        return frame
+    finally:
+        _infer_busy = False
+
+@app.post("/api/webcam/start")
+async def start_webcamera(request: dict):
+    """
+    启动电脑摄像头
+    请求格式:
+    {
+        "camera_id": 0,  // 可选，默认 0
+        "width": 640,    // 可选，默认 640
+        "height": 480    // 可选，默认 480
+    }
+    """
+    global webcam_active, webcam_handler
+
+    camera_id = request.get("camera_id", 0)
+    width = request.get("width", 640)
+    height = request.get("height", 480)
+
+    try:
+        # 获取或创建 webcam handler
+        if webcam_handler is None:
+            webcam_handler = get_webcam_handler()
+            webcam_handler.on_frame_callback = _webcam_frame_processor
+            webcam_handler.viewer_websockets = camera_viewers
+
+        # 确保 viewer_websockets 指向最新的 camera_viewers
+        webcam_handler.viewer_websockets = camera_viewers
+        print(f"[WEBCAM] 当前 viewer 数量: {len(camera_viewers)}")
+
+        # 启动摄像头
+        await webcam_handler.start(camera_id=camera_id, width=width, height=height)
+        webcam_active = True
+        print(f"[WEBCAM] 摄像头已启动，viewer 数量: {len(camera_viewers)}")
+
+        # 初始化导航器（如果还没初始化）
+        global blind_path_navigator, cross_street_navigator, orchestrator
+
+        if blind_path_navigator is None and yolo_seg_model is not None:
+            blind_path_navigator = BlindPathNavigator(yolo_seg_model, obstacle_detector)
+            print("[WEBCAM] 盲道导航器已初始化")
+
+        if cross_street_navigator is None and yolo_seg_model is not None:
+            cross_street_navigator = CrossStreetNavigator(
+                seg_model=yolo_seg_model,
+                coco_model=None,
+                obs_model=None
+            )
+            print("[WEBCAM] 过马路导航器已初始化")
+
+        if orchestrator is None and blind_path_navigator is not None and cross_street_navigator is not None:
+            orchestrator = NavigationMaster(blind_path_navigator, cross_street_navigator)
+            print("[WEBCAM] 统领状态机已初始化")
+
+        camera_info = webcam_handler.get_camera_info()
+
+        return {
+            "success": True,
+            "message": "电脑摄像头已启动",
+            "camera_info": camera_info
+        }
+
+    except Exception as e:
+        print(f"[WEBCAM] 启动失败: {e}")
+        return {"error": str(e)}
+
+@app.post("/api/webcam/stop")
+async def stop_webcamera():
+    """停止电脑摄像头"""
+    global webcam_active, webcam_handler
+
+    try:
+        if webcam_handler:
+            await webcam_handler.stop()
+            webcam_active = False
+
+        return {
+            "success": True,
+            "message": "电脑摄像头已停止"
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/webcam/status")
+async def webcam_status():
+    """获取电脑摄像头状态"""
+    global webcam_active, webcam_handler
+
+    if webcam_handler is None:
+        return {
+            "active": False,
+            "message": "摄像头未初始化"
+        }
+
+    return {
+        "active": webcam_active,
+        "camera_info": webcam_handler.get_camera_info() if webcam_active else None
+    }
+
+@app.post("/api/webcam/capture")
+async def capture_webcam_frame():
+    """
+    捕获一帧图像（用于测试）
+    返回 base64 编码的 JPEG 图像
+    """
+    import base64
+
+    global webcam_handler
+
+    if webcam_handler is None or not webcam_handler.is_running():
+        return {"error": "摄像头未运行"}
+
+    # 这个功能需要扩展 WebcamHandler 来支持单帧捕获
+    # 暂时返回提示
+    return {
+        "message": "请使用 WebSocket /ws/viewer 查看实时画面",
+        "websocket_url": "ws://localhost:8081/ws/viewer"
+    }
 
 # 注册 /stream.wav
 register_stream_route(app)
