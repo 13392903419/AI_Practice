@@ -2173,6 +2173,23 @@ async def on_startup_audio_tests():
     threading.Timer(2.0, _start).start()
 
 @app.on_event("startup")
+async def on_startup_preload_model():
+    if _startup_done:
+        return
+    """启动时预加载 LocalQwen 模型"""
+    def _preload():
+        try:
+            from local_qwen_client import get_local_qwen
+            print("[MODEL] 开始预加载 LocalQwen 模型...")
+            _ = get_local_qwen()
+            print("[MODEL] LocalQwen 模型预加载完成")
+        except Exception as e:
+            print(f"[MODEL] 预加载失败: {e}")
+
+    # 延迟 5 秒启动，给音频系统留出时间，避免资源竞争
+    threading.Timer(5.0, _preload).start()
+
+@app.on_event("startup")
 async def on_startup():
     global _startup_done
     if _startup_done:

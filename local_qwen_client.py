@@ -43,18 +43,24 @@ class LocalQwenClient:
         print(f"[LocalQwen] 正在加载模型: {self.model_path}")
         start = time.time()
 
+        # 规范化路径（Windows 路径处理：反斜杠 -> 正斜杠）
+        model_path = self.model_path.replace('\\', '/')
+        is_local = os.path.exists(self.model_path)
+
         # 加载模型
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-            self.model_path,
+            model_path,
             torch_dtype=torch.bfloat16,
             device_map=self.device_map,
-            trust_remote_code=True
+            trust_remote_code=True,
+            local_files_only=is_local
         ).eval()
 
         # 加载处理器
         self.processor = AutoProcessor.from_pretrained(
-            self.model_path,
-            trust_remote_code=True
+            model_path,
+            trust_remote_code=True,
+            local_files_only=is_local
         )
 
         elapsed = time.time() - start
