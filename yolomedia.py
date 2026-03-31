@@ -20,7 +20,7 @@ import math
 import cv2
 import numpy as np
 import mediapipe as mp
-from mediapipe.framework.formats import landmark_pb2
+# from mediapipe.framework.formats import landmark_pb2  # 不再需要
 from ultralytics import YOLO
 from ultralytics.utils.plotting import Colors
 import bridge_io
@@ -166,7 +166,21 @@ BaseOptions           = mp.tasks.BaseOptions
 VisionRunningMode     = mp.tasks.vision.RunningMode
 HandLandmarker        = mp.tasks.vision.HandLandmarker
 HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
-HAND_CONNECTIONS      = mp.solutions.hands.HAND_CONNECTIONS
+
+# 手部连接定义（21 个关键点的连接关系）
+# 如果 mediapipe.solutions 不可用，使用自定义定义
+try:
+    HAND_CONNECTIONS = mp.solutions.hands.HAND_CONNECTIONS
+except AttributeError:
+    # 自定义手部连接定义
+    HAND_CONNECTIONS = [
+        (0, 1), (1, 2), (2, 3), (3, 4),         # 拇指
+        (0, 5), (5, 6), (6, 7), (7, 8),         # 食指
+        (0, 9), (9, 10), (10, 11), (11, 12),    # 中指
+        (0, 13), (13, 14), (14, 15), (15, 16),  # 无名指
+        (0, 17), (17, 18), (18, 19), (19, 20),  # 小指
+        (5, 9), (9, 13), (13, 17)               # 手掌
+    ]
 
 # ======== HandLandmarker 回调缓存 ========
 _last_result = None  # (result, timestamp_ms)
@@ -176,29 +190,33 @@ def on_result(result: mp.tasks.vision.HandLandmarkerResult,
     global _last_result
     _last_result = (result, timestamp_ms)
 
-def _to_proto(hand_lms) -> landmark_pb2.NormalizedLandmarkList:
-    proto = landmark_pb2.NormalizedLandmarkList()
-    proto.landmark.extend([
-        landmark_pb2.NormalizedLandmark(x=p.x, y=p.y, z=p.z) for p in hand_lms
-    ])
-    return proto
-
 # —— 手骨架单色渲染 —— #
 def draw_hands_mono(img_bgr, hand_lms, color=(0, 255, 255), r=2, t=2):
-    mp_drawing = mp.solutions.drawing_utils
-    landmark_spec   = mp_drawing.DrawingSpec(color=color, thickness=-1, circle_radius=r)
-    connection_spec = mp_drawing.DrawingSpec(color=color, thickness=t,  circle_radius=r)
+    """
+    使用 OpenCV 绘制手部关键点和连接线
+    不依赖 mediapipe.solutions.drawing_utils
+    """
+    import numpy as np
+
+    # 获取关键点坐标
     if hasattr(hand_lms, "landmark"):
-        proto = hand_lms
+        landmarks = [(lm.x, lm.y) for lm in hand_lms.landmark]
     else:
-        proto = _to_proto(hand_lms)
-    mp_drawing.draw_landmarks(
-        img_bgr,
-        landmark_list=proto,
-        connections=HAND_CONNECTIONS,
-        landmark_drawing_spec=landmark_spec,
-        connection_drawing_spec=connection_spec,
-    )
+        landmarks = [(lm.x, lm.y) for lm in hand_lms]
+
+    h, w = img_bgr.shape[:2]
+
+    # 绘制连接线
+    for start_idx, end_idx in HAND_CONNECTIONS:
+        if start_idx < len(landmarks) and end_idx < len(landmarks):
+            x1, y1 = int(landmarks[start_idx][0] * w), int(landmarks[start_idx][1] * h)
+            x2, y2 = int(landmarks[end_idx][0] * w), int(landmarks[end_idx][1] * h)
+            cv2.line(img_bgr, (x1, y1), (x2, y2), color, t)
+
+    # 绘制关键点
+    for x, y in landmarks:
+        cx, cy = int(x * w), int(y * h)
+        cv2.circle(img_bgr, (cx, cy), r, color, -1)
 
 def norm_name(s: str) -> str:
     return "".join(str(s).lower().split())
@@ -706,19 +724,28 @@ def main(headless: bool = False, prompt_name: str = None, stop_event=None):
     print(f"[CLASS] target id={target_cls_id}, name={id_to_name.get(target_cls_id, 'N/A')}")
     print(f"[阈值] conf >= {CONF_THRESHOLD:.2f}")
 
-    # Hand Landmarker
-    print("[INIT] 初始化 Hand Landmarker...")
-    base = BaseOptions(model_asset_path=HAND_TASK_PATH)
-    hand_options = HandLandmarkerOptions(
-        base_options=base,
-        running_mode=VisionRunningMode.LIVE_STREAM,
-        num_hands=1,
-        min_hand_detection_confidence=0.40,
-        min_hand_presence_confidence=0.50,
-        min_tracking_confidence=0.70,
-        result_callback=on_result
-    )
-    landmarker = HandLandmarker.create_from_options(hand_options)
+    # Hand Landmarker（暂时禁用，因为初始化会卡住）
+    landmarker = None
+    print("[INIT] 跳过 Hand Landmarker 初始化（手部检测暂不可用）")
+    # TODO: 修复 MediaPipe Hand Landmarker 初始化卡住的问题
+    """
+    try:
+        base = BaseOptions(model_asset_path=HAND_TASK_PATH)
+        hand_options = HandLandmarkerOptions(
+            base_options=base,
+            running_mode=VisionRunningMode.LIVE_STREAM,
+            num_hands=1,
+            min_hand_detection_confidence=0.40,
+            min_hand_presence_confidence=0.50,
+            min_tracking_confidence=0.70,
+            result_callback=on_result
+        )
+        landmarker = HandLandmarker.create_from_options(hand_options)
+        print("[INIT] Hand Landmarker 初始化成功")
+    except Exception as e:
+        print(f"[WARNING] Hand Landmarker 初始化失败: {e}")
+        print("[WARNING] 手部检测功能将不可用，但物品查找仍可正常工作")
+    """
 
     W = None
     H = None
@@ -772,15 +799,20 @@ def main(headless: bool = False, prompt_name: str = None, stop_event=None):
     old_background_gray = None
 
     try:
+        wait_count = 0
         while True:
             # 检查停止事件
             if stop_event and stop_event.is_set():
                 print("[YOLOMEDIA] Stop event detected, exiting...")
                 break
-                
+
             frame = bridge_io.wait_raw_bgr(timeout_sec=0.5)
             if frame is None:
                 # 没取到帧就继续等（ESP32还没连上或暂时无新帧）
+                # 每 10 秒打印一次
+                wait_count += 1
+                if wait_count % 20 == 1:  # 约每 10 秒（0.5s * 20）
+                    print("[YOLOMEDIA] 等待画面中...（请确认摄像头已启动）", flush=True)
                 # [headless] 给出 1ms 让出调度，避免空转
                 if headless:
                     time.sleep(0.001)
@@ -794,7 +826,7 @@ def main(headless: bool = False, prompt_name: str = None, stop_event=None):
             t_now = time.time()
 
             # 抽帧 + 降采样（人手识别）
-            if FRAME_IDX % HAND_FPS_DIV == 0:
+            if landmarker is not None and FRAME_IDX % HAND_FPS_DIV == 0:
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 if HAND_DOWNSCALE and HAND_DOWNSCALE != 1.0:
                     small = cv2.resize(rgb, None, fx=HAND_DOWNSCALE, fy=HAND_DOWNSCALE, interpolation=cv2.INTER_AREA)
@@ -1554,7 +1586,8 @@ def main(headless: bool = False, prompt_name: str = None, stop_event=None):
 
     finally:
         try:
-            landmarker.close()
+            if landmarker is not None:
+                landmarker.close()
         except Exception:
             pass
         #cap.release()

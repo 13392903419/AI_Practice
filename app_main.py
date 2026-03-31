@@ -110,7 +110,7 @@ camera_viewers: Set[WebSocket] = set()
 # 【ESP32 已禁用】
 # esp32_camera_ws: Optional[WebSocket] = None
 imu_ws_clients: Set[WebSocket] = set()
-# esp32_audio_ws: Optional[WebSocket] = None
+esp32_audio_ws: Optional[WebSocket] = None  # 音频 WebSocket（电脑麦克风）
 # 【ESP32 已禁用结束】
 
 # 【新增】盲道导航相关全局变量
@@ -338,6 +338,38 @@ async def ui_broadcast_final(text: str):
     await ui_broadcast_raw("FINAL:" + text)
     print(f"[ASR/AI FINAL] {text}", flush=True)
 
+
+# ============== ASR 广播包装函数（过滤 TTS 播放期间的输出） ==============
+def _check_tts_filtering() -> bool:
+    """检查是否应该过滤 ASR 结果（TTS 正在播放或刚播放完）"""
+    from audio_player import get_tts_status
+    import time as time_module
+    tts_playing, tts_start_time = get_tts_status()
+    TTS_IGNORE_WINDOW = 5.0  # TTS 播放后 5 秒内忽略 ASR 结果
+
+    if tts_playing:
+        return True  # TTS 正在播放，过滤
+    else:
+        current_time = time_module.time()
+        if tts_start_time > 0 and (current_time - tts_start_time < TTS_IGNORE_WINDOW):
+            return True  # TTS 播放后 5 秒内，过滤
+    return False
+
+
+async def ui_broadcast_partial_with_tts_check(text: str):
+    """包装函数：TTS 播放期间不广播 partial 结果"""
+    if _check_tts_filtering():
+        return  # 静默过滤
+    await ui_broadcast_partial(text)
+
+
+async def ui_broadcast_final_with_tts_check(text: str):
+    """包装函数：TTS 播放期间不广播 final 结果"""
+    if _check_tts_filtering():
+        return  # 静默过滤
+    await ui_broadcast_final(text)
+
+
 async def full_system_reset(reason: str = ""):
     """
     回到刚启动后的状态：
@@ -430,62 +462,106 @@ def stop_yolomedia():
 # 全局变量：Chat 模式是否启用
 chat_mode_enabled = False
 
+def play_voice_text_with_state(text: str):
+    """包装 play_voice_text，TTS 状态管理已在 audio_player.py 内部处理"""
+    play_voice_text(text)
+
 async def start_ai_with_text_custom(user_text: str):
     """扩展版的AI启动函数，支持识别特殊命令"""
     global navigation_active, blind_path_navigator, cross_street_active, cross_street_navigator, orchestrator, chat_mode_enabled
 
-    # ========== 【过滤循环】过滤 Agent 响应，避免 TTS 被重新识别 ==========
+    # 注意：TTS 播放期间的 ASR 结果已在 ASR 回调层面过滤（ui_broadcast_partial_with_tts_check）
+
+    # ========== 【过滤循环】过滤 TTS 语音被重新识别（备用保护） ==========
+    # Agent 响应相关
     agent_response_patterns = ["已记录目的地", "已保存偏好", "已启动", "已停止", "正在帮您", "准备", "检测到"]
-    if any(user_text.startswith(pattern) for pattern in agent_response_patterns):
-        print(f"[FILTER] 过滤 Agent 响应: {user_text}")
+    # 导航指令相关（TTS 播放的导航提示会被麦克风收到）
+    nav_guidance_patterns = ["向左", "向右", "向前", "向后", "向上", "向下", "请把镜头", "转向周围", "正在寻找"]
+    # 系统提示相关
+    system_prompt_patterns = ["对话模式已", "导航系统", "过马路模式", "红绿灯检测", "盲道导航", "找物品"]
+    # 【新增】TTS 播放的 AI 回复特征词
+    tts_response_patterns = [
+        "用户问的是", "用户说的是", "当前摄像头画面显示的是", "这是一个", "这个用户",
+        "用户手里拿的是", "用户想了解", "用户在问", "用户描述",
+        "教室的", "墙壁是", "天花板上有", "门是", "穿着", "戴着眼"
+    ]
+
+    all_filter_patterns = agent_response_patterns + nav_guidance_patterns + system_prompt_patterns + tts_response_patterns
+
+    # 检查是否匹配任何过滤模式
+    should_filter = False
+    for pattern in all_filter_patterns:
+        if pattern in user_text:
+            should_filter = True
+            break
+
+    if should_filter:
+        print(f"[FILTER] 过滤 TTS/系统语音: {user_text}", flush=True)
         return
 
-    # ========== 【热词控制】Chat 模式开关 ==========
-    if "小慧小慧启动" in user_text or "小慧启动" in user_text:
-        chat_mode_enabled = True
-        play_voice_text("对话模式已开启")
-        await ui_broadcast_final("[系统] 对话模式已开启，现在可以和我聊天了")
-        return
+    # ========== 【热词控制】Chat 模式开关（优先级最高）==========
+    # 去除标点符号，避免 ASR 识别 "小慧小慧。启动。" 导致匹配失败
+    clean_text = user_text.replace("。", "").replace("！", "").replace("？", "").replace(",", "").replace("，", "").replace("、", "").strip()
 
-    if "小慧小慧停止" in user_text or "小慧停止" in user_text:
-        chat_mode_enabled = False
-        play_voice_text("对话模式已关闭")
-        await ui_broadcast_final("[系统] 对话模式已关闭，只响应导航命令")
-        return
+    # 检查 "小慧小慧" 相关热词（必须包含 "小慧"）
+    if any(keyword in clean_text for keyword in ["小慧", "小会", "晓辉", "xiaohui", "小惠", "小灰", "小辉"]):
+        if "启动" in clean_text or "开始" in clean_text or "开启" in clean_text:
+            chat_mode_enabled = True
+            play_voice_text("对话模式已开启")
+            await ui_broadcast_final("[系统] 对话模式已开启，现在可以和我聊天了")
+            return
+        if "停止" in clean_text or "关闭" in clean_text or "结束" in clean_text:
+            chat_mode_enabled = False
+            play_voice_text("对话模式已关闭")
+            await ui_broadcast_final("[系统] 对话模式已关闭，只响应导航命令")
+            return
 
-    # ========== 【Agent 意图识别】 ==========
-    try:
-        agent = get_agent_instance()
-        from simple_agent import AgentRequest
+    # ========== 【Agent 意图识别】（只有在非 chat 模式下才执行）==========
+    # 如果 chat 模式已开启，跳过 Agent，直接进入 omni 对话
+    if chat_mode_enabled:
+        print(f"[CHAT] Chat 模式已启用，跳过 Agent，直接进入 omni 对话: {user_text}")
+    else:
+        try:
+            agent = get_agent_instance()
+            from simple_agent import AgentRequest
 
-        # 确保 orchestrator 已初始化
-        global orchestrator
-        if orchestrator is None:
-            print("[AGENT] orchestrator 未初始化，跳过 Agent 处理")
-        else:
-            # 传递 orchestrator 给 Agent
-            agent.tool_executor.set_nav_master(orchestrator)
+            # 确保 orchestrator 已初始化
+            global orchestrator
+            if orchestrator is None:
+                print("[AGENT] orchestrator 未初始化，跳过 Agent 处理")
+            else:
+                # 传递 orchestrator 给 Agent
+                agent.tool_executor.set_nav_master(orchestrator)
 
-        agent_request = AgentRequest(user_input=user_text, input_type="voice")
-        agent_response = await agent.process(agent_request)
+            agent_request = AgentRequest(user_input=user_text, input_type="voice")
+            agent_response = await agent.process(agent_request)
 
-        print(f"[AGENT] 意图={agent_response.intent}, 响应={agent_response.text}")
+            print(f"[AGENT] 意图={agent_response.intent}, 响应={agent_response.text}")
 
-        # 如果是工具调用（不是闲聊），执行后直接返回
-        if agent_response.intent and agent_response.intent != "chat":
-            # 播放 Agent 的响应（异步，不阻塞）
-            if agent_response.text:
-                # 在后台线程中播放 TTS，避免阻塞
+            # 如果是工具调用（不是闲聊），执行后直接返回
+            # 【注意】find_object 意图需要继续执行后续的物品查找逻辑，不能提前 return
+            if agent_response.intent and agent_response.intent != "chat" and agent_response.intent != "find_object":
+                # 播放 Agent 的响应（异步，不阻塞）
+                if agent_response.text:
+                    # 在后台线程中播放 TTS，避免阻塞
+                    import threading
+                    def play_async():
+                        play_voice_text(agent_response.text)
+                    threading.Thread(target=play_async, daemon=True).start()
+                    await ui_broadcast_final(f"[Agent] {agent_response.text}")
+                return
+            # 对于 find_object 意图，播放 TTS 但继续执行后续逻辑
+            if agent_response.intent == "find_object" and agent_response.text:
                 import threading
                 def play_async():
                     play_voice_text(agent_response.text)
                 threading.Thread(target=play_async, daemon=True).start()
                 await ui_broadcast_final(f"[Agent] {agent_response.text}")
-            return
-    except Exception as e:
-        import traceback
-        print(f"[AGENT] 处理失败: {e}")
-        traceback.print_exc()
+                # 注意：不 return，继续执行后续的物品查找逻辑
+        except Exception as e:
+            import traceback
+            print(f"[AGENT] 处理失败: {e}")
+            traceback.print_exc()
 
     # 【修改】在导航模式下，检查是否允许进入 chat 模式
     if orchestrator:
@@ -699,18 +775,50 @@ async def start_ai_with_text(user_text: str):
         txt_buf: List[str] = []
         rate_state = None
 
-        # 构建含长期记忆的 Prompt
-        mem_ctx = memory_manager.get_context()
-        if mem_ctx:
-            enhanced_text = f"【系统提示：{mem_ctx}】\n\n用户说：{user_text}"
+        # 声明全局变量
+        global chat_mode_enabled, omni_conversation_active, omni_previous_nav_state, last_frames
+
+        # 【调试】检查 last_frames 是否有数据
+        if last_frames:
+            print(f"[OMNI] last_frames 有 {len(last_frames)} 帧", flush=True)
         else:
-            enhanced_text = user_text
+            print(f"[OMNI] 警告：last_frames 为空！Qwen 将看不到画面", flush=True)
+
+        # 【画面时效性检查】只使用最近 1 秒内的画面
+        import time as time_module
+        current_time = time_module.time()
+        valid_frames = [(ts, data) for ts, data in last_frames if current_time - ts < 1.0]
+
+        if valid_frames:
+            print(f"[OMNI] 找到 {len(valid_frames)} 帧有效画面（1秒内）", flush=True)
+        else:
+            print(f"[OMNI] 警告：没有最近 1 秒内的画面！Qwen 可能看到旧画面", flush=True)
+
+        # 【Chat 模式优化】只分析画面，不注入记忆
+        if chat_mode_enabled:
+            # Chat 模式：纯画面分析，不使用记忆
+            enhanced_text = f"请分析当前摄像头画面，回答用户的问题。用户问：{user_text}"
+        else:
+            # 其他模式：可以使用记忆辅助
+            mem_ctx = memory_manager.get_context()
+            if mem_ctx:
+                enhanced_text = f"【系统提示：{mem_ctx}】\n\n用户说：{user_text}"
+            else:
+                enhanced_text = user_text
 
         # 组装（图像+文本）
         content_list = []
         if last_frames:
             try:
-                _, jpeg_bytes = last_frames[-1]
+                # 使用最新的有效帧
+                if valid_frames:
+                    _, jpeg_bytes = valid_frames[-1]  # 取最近 1 秒内的最新帧
+                    print(f"[OMNI] 使用最新帧（时间差: {current_time - valid_frames[-1][0]:.2f}秒）", flush=True)
+                else:
+                    # 如果没有最近 1 秒的帧，使用最新的帧（但可能很旧）
+                    _, jpeg_bytes = last_frames[-1]
+                    print(f"[OMNI] 警告：使用旧帧（时间差: {current_time - last_frames[-1][0]:.2f}秒）", flush=True)
+
                 img_b64 = base64.b64encode(jpeg_bytes).decode("ascii")
                 content_list.append({
                     "type": "image_url",
@@ -721,6 +829,7 @@ async def start_ai_with_text(user_text: str):
         content_list.append({"type": "text", "text": enhanced_text})
 
         try:
+            has_cloud_audio = False  # 标记云端是否返回了音频
             async for piece in stream_chat(content_list, voice="Cherry", audio_format="wav"):
                 # 文本增量（仅 UI）
                 if piece.text_delta:
@@ -732,6 +841,7 @@ async def start_ai_with_text(user_text: str):
 
                 # 音频分片：Omni 返回 24k (PCM16) 的 wav audio.data（Base64）；下行需要 8k PCM16
                 if piece.audio_b64:
+                    has_cloud_audio = True  # 云端有音频
                     try:
                         pcm24 = base64.b64decode(piece.audio_b64)
                     except Exception:
@@ -743,6 +853,14 @@ async def start_ai_with_text(user_text: str):
                         if pcm8k:
                             await broadcast_pcm16_realtime(pcm8k)
 
+            # 【本地 TTS】如果没有云端音频，使用 pyttsx3 播放完整文本
+            if not has_cloud_audio:
+                final_text = ("".join(txt_buf)).strip()
+                if final_text:
+                    print(f"[TTS] 使用本地 TTS 播放: {final_text[:30]}...", flush=True)
+                    # 使用已有的 play_voice_text 函数（它内部处理 pyttsx3）
+                    play_voice_text(final_text)
+
         except asyncio.CancelledError:
             # 被新一轮打断
             raise
@@ -752,10 +870,15 @@ async def start_ai_with_text(user_text: str):
             except Exception:
                 pass
         finally:
-            # 【修改】标记omni对话结束，恢复之前的导航模式
-            global omni_conversation_active, omni_previous_nav_state
+            # 【Chat 模式优化】Chat 模式回答一次后自动关闭
+            if chat_mode_enabled:
+                # Chat 模式：回答一次后自动关闭
+                chat_mode_enabled = False
+                print(f"[OMNI] Chat 模式：回答完成，自动关闭", flush=True)
+
+            # 结束对话，恢复导航状态
             omni_conversation_active = False
-            
+
             # 恢复之前的导航状态
             if orchestrator and omni_previous_nav_state:
                 orchestrator.force_state(omni_previous_nav_state)
@@ -914,7 +1037,22 @@ webcam_handler: WebcamHandler = None
 
 def _webcam_frame_processor(frame):
     """电脑摄像头帧处理函数 - 使用优化处理器"""
-    global orchestrator, yolomedia_running
+    global orchestrator, yolomedia_running, last_frames
+
+    # 【关键】把帧推送到 bridge_io，供 yolomedia 使用
+    try:
+        import bridge_io
+        _, jpeg = cv2.imencode('.jpg', frame)
+        jpeg_bytes = jpeg.tobytes()
+        bridge_io.push_raw_jpeg(jpeg_bytes)
+
+        # 【新增】更新 last_frames，供 Qwen 对话使用
+        try:
+            last_frames.append((time.time(), jpeg_bytes))
+        except Exception as e:
+            pass  # 静默失败，不影响主流程
+    except Exception as e:
+        pass  # 静默失败，不影响主流程
 
     # 如果没有 orchestrator，直接返回原始帧
     if orchestrator is None:
@@ -950,8 +1088,7 @@ def _webcam_frame_processor(frame):
 
         return result_frame if result_frame is not None else frame
     except Exception as e:
-        print(f"[WEBCAM] 处理帧失败: {e}")
-        return frame
+        return frame  # 静默失败，返回原始帧
 
 @app.post("/api/webcam/start")
 async def start_webcamera(request: dict):
@@ -979,19 +1116,16 @@ async def start_webcamera(request: dict):
 
         # 确保 viewer_websockets 指向最新的 camera_viewers
         webcam_handler.viewer_websockets = camera_viewers
-        print(f"[WEBCAM] 当前 viewer 数量: {len(camera_viewers)}")
 
         # 启动摄像头
         await webcam_handler.start(camera_id=camera_id, width=width, height=height)
         webcam_active = True
-        print(f"[WEBCAM] 摄像头已启动，viewer 数量: {len(camera_viewers)}")
 
         # 初始化导航器（如果还没初始化）
         global blind_path_navigator, cross_street_navigator, orchestrator
 
         if blind_path_navigator is None and yolo_seg_model is not None:
             blind_path_navigator = BlindPathNavigator(yolo_seg_model, obstacle_detector)
-            print("[WEBCAM] 盲道导航器已初始化")
 
         if cross_street_navigator is None and yolo_seg_model is not None:
             cross_street_navigator = CrossStreetNavigator(
@@ -999,11 +1133,9 @@ async def start_webcamera(request: dict):
                 coco_model=None,
                 obs_model=None
             )
-            print("[WEBCAM] 过马路导航器已初始化")
 
         if orchestrator is None and blind_path_navigator is not None and cross_street_navigator is not None:
             orchestrator = NavigationMaster(blind_path_navigator, cross_street_navigator)
-            print("[WEBCAM] 统领状态机已初始化")
 
         camera_info = webcam_handler.get_camera_info()
 
@@ -1014,7 +1146,6 @@ async def start_webcamera(request: dict):
         }
 
     except Exception as e:
-        print(f"[WEBCAM] 启动失败: {e}")
         return {"error": str(e)}
 
 @app.post("/api/webcam/stop")
@@ -1253,140 +1384,140 @@ async def ws_ui(ws: WebSocket):
     finally:
         ui_clients.pop(id(ws), None)
 
-# ---------- WebSocket：ESP32 音频入口（ASR 上行） 【ESP32 已禁用】----------
-# @app.websocket("/ws_audio")
-# async def ws_audio(ws: WebSocket):
-#     global esp32_audio_ws
-#     esp32_audio_ws = ws
-#     await ws.accept()
-#     print("\n[AUDIO] client connected")
-#     recognition = None
-#     streaming = False
-#     last_ts = time.monotonic()
-#     keepalive_task: Optional[asyncio.Task] = None
+# ---------- WebSocket：音频入口（ASR 上行） 支持电脑麦克风 ----------
+@app.websocket("/ws_audio")
+async def ws_audio(ws: WebSocket):
+    global esp32_audio_ws
+    esp32_audio_ws = ws
+    await ws.accept()
+    print("\n[AUDIO] client connected")
+    recognition = None
+    streaming = False
+    last_ts = time.monotonic()
+    keepalive_task: Optional[asyncio.Task] = None
 
-#     async def stop_rec(send_notice: Optional[str] = None):
-#         nonlocal recognition, streaming, keepalive_task
-#         if keepalive_task and not keepalive_task.done():
-#             keepalive_task.cancel()
-#             try: await keepalive_task
-#             except Exception: pass
-#         keepalive_task = None
-#         if recognition:
-#             try: recognition.stop()
-#             except Exception: pass
-#             recognition = None
-#         await set_current_recognition(None)
-#         streaming = False
-#         if send_notice:
-#             try: await ws.send_text(send_notice)
-#             except Exception: pass
+    async def stop_rec(send_notice: Optional[str] = None):
+        nonlocal recognition, streaming, keepalive_task
+        if keepalive_task and not keepalive_task.done():
+            keepalive_task.cancel()
+            try: await keepalive_task
+            except Exception: pass
+        keepalive_task = None
+        if recognition:
+            try: recognition.stop()
+            except Exception: pass
+            recognition = None
+        await set_current_recognition(None)
+        streaming = False
+        if send_notice:
+            try: await ws.send_text(send_notice)
+            except Exception: pass
 
-#     async def on_sdk_error(_msg: str):
-#         await stop_rec(send_notice="RESTART")
+    async def on_sdk_error(_msg: str):
+        await stop_rec(send_notice="RESTART")
 
-#     async def keepalive_loop():
-#         nonlocal last_ts, recognition, streaming
-#         try:
-#             while streaming and recognition is not None:
-#                 idle = time.monotonic() - last_ts
-#                 if idle > 0.35:
-#                     try:
-#                         for _ in range(30):  # ~600ms 静音
-#                             recognition.send_audio_frame(SILENCE_20MS)
-#                         last_ts = time.monotonic()
-#                     except Exception:
-#                         await on_sdk_error("keepalive send failed")
-#                         return
-#                 await asyncio.sleep(0.10)
-#         except asyncio.CancelledError:
-#             return
+    async def keepalive_loop():
+        nonlocal last_ts, recognition, streaming
+        try:
+            while streaming and recognition is not None:
+                idle = time.monotonic() - last_ts
+                if idle > 0.35:
+                    try:
+                        for _ in range(30):  # ~600ms 静音
+                            recognition.send_audio_frame(SILENCE_20MS)
+                        last_ts = time.monotonic()
+                    except Exception:
+                        await on_sdk_error("keepalive send failed")
+                        return
+                await asyncio.sleep(0.10)
+        except asyncio.CancelledError:
+            return
 
-#     try:
-#         while True:
-#             if WebSocketState and ws.client_state != WebSocketState.CONNECTED:
-#                 break
-#             try:
-#                 msg = await ws.receive()
-#             except WebSocketDisconnect:
-#                 break
-#             except RuntimeError as e:
-#                 if "Cannot call \"receive\"" in str(e):
-#                     break
-#                 raise
+    try:
+        while True:
+            if WebSocketState and ws.client_state != WebSocketState.CONNECTED:
+                break
+            try:
+                msg = await ws.receive()
+            except WebSocketDisconnect:
+                break
+            except RuntimeError as e:
+                if "Cannot call \"receive\"" in str(e):
+                    break
+                raise
 
-#             if "text" in msg and msg["text"] is not None:
-#                 raw = (msg["text"] or "").strip()
-#                 cmd = raw.upper()
+            if "text" in msg and msg["text"] is not None:
+                raw = (msg["text"] or "").strip()
+                cmd = raw.upper()
 
-#                 if cmd == "START":
-#                     print("[AUDIO] START received")
-#                     await stop_rec()
-#                     loop = asyncio.get_running_loop()
-#                     def post(coro):
-#                         asyncio.run_coroutine_threadsafe(coro, loop)
+                if cmd == "START":
+                    print("[AUDIO] START received")
+                    await stop_rec()
+                    loop = asyncio.get_running_loop()
+                    def post(coro):
+                        asyncio.run_coroutine_threadsafe(coro, loop)
 
                     # 组装 ASR 回调（把依赖都注入）
-#                     cb = ASRCallback(
-#                         on_sdk_error=lambda s: post(on_sdk_error(s)),
-#                         post=post,
-#                         ui_broadcast_partial=ui_broadcast_partial,
-#                         ui_broadcast_final=ui_broadcast_final,
-#                         is_playing_now_fn=is_playing_now,
-#                         start_ai_with_text_fn=start_ai_with_text_custom,  # 使用自定义版本
-#                         full_system_reset_fn=full_system_reset,
-#                         interrupt_lock=interrupt_lock,
-#                     )
+                    cb = ASRCallback(
+                        on_sdk_error=lambda s: post(on_sdk_error(s)),
+                        post=post,
+                        ui_broadcast_partial=ui_broadcast_partial_with_tts_check,  # 使用带 TTS 检查的包装函数
+                        ui_broadcast_final=ui_broadcast_final_with_tts_check,      # 使用带 TTS 检查的包装函数
+                        is_playing_now_fn=is_playing_now,
+                        start_ai_with_text_fn=start_ai_with_text_custom,  # 使用自定义版本
+                        full_system_reset_fn=full_system_reset,
+                        interrupt_lock=interrupt_lock,
+                    )
 
-#                     recognition = dash_audio.asr.Recognition(
-#                         api_key=API_KEY, model=MODEL, format=AUDIO_FMT,
-#                         sample_rate=SAMPLE_RATE, callback=cb
-#                     )
-#                     recognition.start()
-#                     await set_current_recognition(recognition)
-#                     streaming = True
-#                     last_ts = time.monotonic()
-#                     keepalive_task = asyncio.create_task(keepalive_loop())
-#                     await ui_broadcast_partial("（已开始接收音频…）")
-#                     await ws.send_text("OK:STARTED")
+                    recognition = dash_audio.asr.Recognition(
+                        api_key=API_KEY, model=MODEL, format=AUDIO_FMT,
+                        sample_rate=SAMPLE_RATE, callback=cb
+                    )
+                    recognition.start()
+                    await set_current_recognition(recognition)
+                    streaming = True
+                    last_ts = time.monotonic()
+                    keepalive_task = asyncio.create_task(keepalive_loop())
+                    await ui_broadcast_partial("（已开始接收音频…）")
+                    await ws.send_text("OK:STARTED")
 
-#                 elif cmd == "STOP":
-#                     if recognition:
-#                         for _ in range(15):  # ~300ms 静音
-#                             try: recognition.send_audio_frame(SILENCE_20MS)
-#                             except Exception: break
-#                     await stop_rec(send_notice="OK:STOPPED")
+                elif cmd == "STOP":
+                    if recognition:
+                        for _ in range(15):  # ~300ms 静音
+                            try: recognition.send_audio_frame(SILENCE_20MS)
+                            except Exception: break
+                    await stop_rec(send_notice="OK:STOPPED")
 
-#                 elif raw.startswith("PROMPT:"):
-                    # 设备端主动发起一轮：同样使用“先硬重置后播放”的强语义
-#                     text = raw[len("PROMPT:"):].strip()
-#                     if text:
-#                         async with interrupt_lock:
-#                             await start_ai_with_text_custom(text) # 使用自定义的启动函数
-#                         await ws.send_text("OK:PROMPT_ACCEPTED")
-#                     else:
-#                         await ws.send_text("ERR:EMPTY_PROMPT")
+                elif raw.startswith("PROMPT:"):
+                    # 设备端主动发起一轮：同样使用"先硬重置后播放"的强语义
+                    text = raw[len("PROMPT:"):].strip()
+                    if text:
+                        async with interrupt_lock:
+                            await start_ai_with_text_custom(text) # 使用自定义的启动函数
+                        await ws.send_text("OK:PROMPT_ACCEPTED")
+                    else:
+                        await ws.send_text("ERR:EMPTY_PROMPT")
 
-#             elif "bytes" in msg and msg["bytes"] is not None:
-#                 if streaming and recognition:
-#                     try:
-#                         recognition.send_audio_frame(msg["bytes"])
-#                         last_ts = time.monotonic()
-#                     except Exception:
-#                         await on_sdk_error("send_audio_frame failed")
+            elif "bytes" in msg and msg["bytes"] is not None:
+                if streaming and recognition:
+                    try:
+                        recognition.send_audio_frame(msg["bytes"])
+                        last_ts = time.monotonic()
+                    except Exception:
+                        await on_sdk_error("send_audio_frame failed")
 
-#     except Exception as e:
-#         print(f"\n[WS ERROR] {e}")
-#     finally:
-#         await stop_rec()
-#         try:
-#             if WebSocketState is None or ws.client_state == WebSocketState.CONNECTED:
-#                 await ws.close(code=1000)
-#         except Exception:
-#             pass
-#         if esp32_audio_ws is ws:
-#             esp32_audio_ws = None
-#         print("[WS] connection closed")
+    except Exception as e:
+        print(f"\n[WS ERROR] {e}")
+    finally:
+        await stop_rec()
+        try:
+            if WebSocketState is None or ws.client_state == WebSocketState.CONNECTED:
+                await ws.close(code=1000)
+        except Exception:
+            pass
+        if esp32_audio_ws is ws:
+            esp32_audio_ws = None
+        print("[WS] connection closed")
 
 # ---------- WebSocket：ESP32 相机入口（JPEG 二进制） ----------
 @app.websocket("/ws/camera")

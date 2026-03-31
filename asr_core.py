@@ -174,7 +174,7 @@ class ASRCallback:
         # ---------- ② partial：仅用于 UI 展示 ----------
         self._last_partial_for_ui = text
         try:
-            print(f"[ASR PARTIAL] len={len(text)} text='{_shorten(text)}'", flush=True)
+            # partial 结果不打印，减少日志噪音
             self._post(self._ui_partial(self._last_partial_for_ui))
         except Exception:
             pass

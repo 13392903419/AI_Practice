@@ -448,7 +448,8 @@ def play_voice_text(text: str):
     # 【新增】TTS 合成：对于未知的语音，使用 TTS 合成
     if USE_TTS_FOR_UNKNOWN and len(text) <= 200:  # 限制长度，避免过长文本
         print(f"[AUDIO] 使用 TTS 合成语音: {text[:30]}...")
-        asyncio.create_task(_synthesize_and_play(text))
+        # 直接调用，内部已用线程处理，无需 asyncio.create_task
+        _synthesize_and_play(text)
         _last_voice_text = text
         _last_voice_time = current_time
         return
@@ -461,13 +462,24 @@ play_audio_on_esp32 = play_audio_threadsafe
 
 
 # ========== TTS 合成和播放 ==========
-async def _synthesize_and_play(text: str):
+# 【TTS 播放状态管理】用于过滤 TTS 语音被 ASR 重新识别
+_tts_playing: bool = False
+_tts_start_time: float = 0.0
+_TTS_IGNORE_WINDOW = 3.0  # TTS 播放后 3 秒内忽略 ASR 结果
+
+def get_tts_status() -> tuple[bool, float]:
+    """获取 TTS 播放状态（用于 ASR 过滤）"""
+    return _tts_playing, _tts_start_time
+
+def _synthesize_and_play(text: str):
     """
     使用 TTS 合成语音并播放
     :param text: 要合成的文本
     """
+    global _tts_playing, _tts_start_time
     try:
         import audioop
+        import time as time_module
 
         if TTS_ENGINE == "local":
             # 【本地 TTS】使用 pyttsx3（零网络延迟）
@@ -475,15 +487,27 @@ async def _synthesize_and_play(text: str):
             import threading
 
             def play_local_tts():
+                global _tts_playing, _tts_start_time
                 try:
+                    # 标记 TTS 开始播放
+                    _tts_playing = True
+                    _tts_start_time = time_module.time()
+                    print(f"[TTS] 开始播放: {text[:30]}...", flush=True)
+
                     engine = pyttsx3.init()
                     engine.setProperty('rate', 150)  # 语速
                     engine.setProperty('volume', 0.9)  # 音量
                     engine.say(text)
                     engine.runAndWait()
-                    print(f"[TTS] 本地 TTS 播放完成: {text[:30]}...")
+
+                    print(f"[TTS] 本地 TTS 播放完成: {text[:30]}...", flush=True)
                 except Exception as e:
-                    print(f"[TTS] 本地 TTS 播放失败: {e}")
+                    print(f"[TTS] 本地 TTS 播放失败: {e}", flush=True)
+                finally:
+                    # 延迟重置状态（留出时间让最后的语音被麦克风接收）
+                    time_module.sleep(2.0)  # 增加到 2 秒
+                    _tts_playing = False
+                    print(f"[TTS] TTS 播放窗口已结束", flush=True)
 
             # 在后台线程中播放，避免阻塞
             thread = threading.Thread(target=play_local_tts, daemon=True)
