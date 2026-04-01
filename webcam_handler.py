@@ -50,6 +50,64 @@ class WebcamHandler:
 
         # 主事件循环（用于 WebSocket 发送）
         self.main_loop = None
+        self.camera_id = 0
+        self.width = 640
+        self.height = 480
+        self._read_fail_count = 0
+
+    def _open_camera(self, camera_id: int, width: int, height: int) -> Optional[cv2.VideoCapture]:
+        """按优先级尝试打开摄像头，提升 Windows 兼容性。"""
+        # Windows 上优先尝试更稳定的后端，避免 default 后端可打开但持续 read 失败。
+        backend_candidates = []
+        if hasattr(cv2, "CAP_DSHOW"):
+            backend_candidates.append(cv2.CAP_DSHOW)
+        if hasattr(cv2, "CAP_MSMF"):
+            backend_candidates.append(cv2.CAP_MSMF)
+        backend_candidates.append(None)
+
+        for backend in backend_candidates:
+            cap = cv2.VideoCapture(camera_id) if backend is None else cv2.VideoCapture(camera_id, backend)
+            if cap is None or not cap.isOpened():
+                if cap is not None:
+                    cap.release()
+                continue
+
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            try:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            except Exception:
+                pass
+
+            # 预热并验证读帧能力：某些 backend isOpened=True 但实际读不到帧。
+            read_ok = False
+            for _ in range(8):
+                ok, _frame = cap.read()
+                if ok:
+                    read_ok = True
+                    break
+                time.sleep(0.03)
+
+            if not read_ok:
+                backend_name = "unknown"
+                try:
+                    backend_name = cap.getBackendName()
+                except Exception:
+                    pass
+                logger.warning(f"[WEBCAM] backend={backend_name} 打开成功但读帧失败，尝试下一个后端")
+                cap.release()
+                continue
+
+            backend_name = "default"
+            try:
+                backend_name = cap.getBackendName()
+            except Exception:
+                pass
+            logger.info(f"[WEBCAM] 摄像头打开成功，backend={backend_name}, id={camera_id}")
+            return cap
+
+        return None
 
     def _capture_loop(self):
         """摄像头捕获线程"""
@@ -65,9 +123,25 @@ class WebcamHandler:
 
             ret, frame = self.cap.read()
             if not ret:
-                logger.warning("[WEBCAM] 读取帧失败")
+                self._read_fail_count += 1
+                if self._read_fail_count == 1 or self._read_fail_count % 30 == 0:
+                    logger.warning(f"[WEBCAM] 读取帧失败 x{self._read_fail_count}")
+
+                if self._read_fail_count >= 20:
+                    logger.warning("[WEBCAM] 连续读帧失败，尝试重连摄像头")
+                    try:
+                        if self.cap is not None:
+                            self.cap.release()
+                    except Exception:
+                        pass
+                    self.cap = None
+                    time.sleep(0.2)
+                    self.cap = self._open_camera(self.camera_id, self.width, self.height)
+                    self._read_fail_count = 0
                 time.sleep(0.1)
                 continue
+
+            self._read_fail_count = 0
 
             try:
                 # 处理帧
@@ -151,13 +225,13 @@ class WebcamHandler:
 
         logger.info(f"[WEBCAM] 正在打开摄像头 {camera_id}...")
 
-        self.cap = cv2.VideoCapture(camera_id)
-        if not self.cap.isOpened():
-            raise RuntimeError(f"无法打开摄像头 {camera_id}")
+        self.camera_id = camera_id
+        self.width = width
+        self.height = height
 
-        # 设置分辨率
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        self.cap = self._open_camera(camera_id, width, height)
+        if self.cap is None:
+            raise RuntimeError(f"无法打开摄像头 {camera_id}")
 
         actual_width = self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)
         actual_height = self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)

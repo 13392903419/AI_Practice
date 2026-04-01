@@ -6,7 +6,7 @@ import asyncio
 from openai import OpenAI
 
 # 兼容模式的客户端，用于调用 Qwen 提取记忆
-API_KEY = os.getenv("DASHSCOPE_API_KEY", "sk-82107b037f5847ee90deb81f6f976e0f")
+API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
 client = OpenAI(
     api_key=API_KEY,
     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",

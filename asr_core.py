@@ -1,6 +1,6 @@
 # asr_core.py
 # -*- coding: utf-8 -*-
-import os, json, asyncio
+import os, json, asyncio, inspect
 from typing import Any, Dict, List, Optional, Callable, Tuple
 
 ASR_DEBUG_RAW = os.getenv("ASR_DEBUG_RAW", "0") == "1"
@@ -70,6 +70,64 @@ def _normalize_cn(s: str) -> str:
 # ============ ASR 全局总闸 ============
 _current_recognition: Optional[object] = None
 _rec_lock = asyncio.Lock()
+
+# 由 ws_audio 在运行时注册，用于“停止后可恢复”的控制
+_pause_asr_handler: Optional[Callable[[], Any]] = None
+_resume_asr_handler: Optional[Callable[[], Any]] = None
+_pause_resume_lock = asyncio.Lock()
+_asr_paused_for_tts = False
+
+# 恢复前延迟，默认 350ms（可通过环境变量覆盖）
+ASR_RESUME_DELAY_SEC = float(os.getenv("ASR_RESUME_DELAY_SEC", "0.35"))
+
+
+def register_asr_pause_resume(
+    pause_handler: Optional[Callable[[], Any]],
+    resume_handler: Optional[Callable[[], Any]],
+):
+    """Register callbacks used by TTS to pause and resume ASR capture."""
+    global _pause_asr_handler, _resume_asr_handler
+    _pause_asr_handler = pause_handler
+    _resume_asr_handler = resume_handler
+
+
+async def _run_handler(handler: Optional[Callable[[], Any]]):
+    if handler is None:
+        return
+    try:
+        result = handler()
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        pass
+
+
+async def pause_current_recognition():
+    """Pause ASR during TTS playback to avoid self-capture."""
+    global _asr_paused_for_tts
+    async with _pause_resume_lock:
+        if _asr_paused_for_tts:
+            return
+        _asr_paused_for_tts = True
+
+        if _pause_asr_handler is not None:
+            await _run_handler(_pause_asr_handler)
+        else:
+            await stop_current_recognition()
+
+
+async def resume_current_recognition():
+    """Resume ASR after TTS playback with a short tail-audio guard delay."""
+    global _asr_paused_for_tts
+    async with _pause_resume_lock:
+        if not _asr_paused_for_tts:
+            return
+        _asr_paused_for_tts = False
+
+        if ASR_RESUME_DELAY_SEC > 0:
+            await asyncio.sleep(ASR_RESUME_DELAY_SEC)
+
+        await _run_handler(_resume_asr_handler)
 
 async def set_current_recognition(r):
     global _current_recognition

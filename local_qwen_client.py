@@ -281,15 +281,33 @@ def build_navigation_prompt(
 # ========== 单例实例（延迟加载） ==========
 _local_qwen_instance: Optional[LocalQwenClient] = None
 
+
+def _resolve_model_path() -> str:
+    """解析模型路径：优先环境变量，其次本地2B目录，最后回退到2B HF ID。"""
+    env_model_path = os.getenv("LOCAL_QWEN_MODEL_PATH", "").strip()
+    if env_model_path:
+        return env_model_path
+
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    local_candidates = [
+        os.path.join(project_dir, "model", "Qwen", "Qwen2-VL-2B-Instruct"),
+        "D:/AIProject/Blind_for_Navigation/model/Qwen/Qwen2-VL-2B-Instruct",
+    ]
+    for candidate in local_candidates:
+        if os.path.isdir(candidate):
+            print(f"[LocalQwen] LOCAL_QWEN_MODEL_PATH 未设置，使用本地2B模型: {candidate}")
+            return candidate
+
+    fallback = "Qwen/Qwen2-VL-2B-Instruct"
+    print(f"[LocalQwen] LOCAL_QWEN_MODEL_PATH 未设置，回退到: {fallback}")
+    return fallback
+
 def get_local_qwen() -> LocalQwenClient:
     """获取本地千问客户端单例"""
     global _local_qwen_instance
 
     if _local_qwen_instance is None:
-        model_path = os.getenv(
-            "LOCAL_QWEN_MODEL_PATH",
-            "Qwen/Qwen2-VL-7B-Instruct"  # 默认 HuggingFace 模型 ID
-        )
+        model_path = _resolve_model_path()
         _local_qwen_instance = LocalQwenClient(model_path=model_path)
 
     return _local_qwen_instance

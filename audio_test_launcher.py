@@ -436,12 +436,12 @@ class AudioTestLauncher:
 _launcher: Optional[AudioTestLauncher] = None
 
 
-def start_audio_tests(wait_for_server=True):
+def start_audio_tests(wait_for_server=True, startup_timeout=10):
     """启动音频测试（从 app_main.py 调用）"""
     global _launcher
     if _launcher is None:
         _launcher = AudioTestLauncher()
-    return _launcher.start(wait_for_server=wait_for_server)
+    return _launcher.start(wait_for_server=wait_for_server, startup_timeout=startup_timeout)
 
 
 def stop_audio_tests():

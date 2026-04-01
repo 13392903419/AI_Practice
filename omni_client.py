@@ -10,13 +10,13 @@ from typing import Optional
 USE_LOCAL_QWEN = os.getenv("USE_LOCAL_QWEN", "true").lower() == "true"
 
 # ===== OpenAI 兼容（达摩院 DashScope 兼容模式）=====
-API_KEY = os.getenv("DASHSCOPE_API_KEY", "sk-82107b037f5847ee90deb81f6f976e0f")
+API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
 QWEN_MODEL = "qwen-omni-turbo"
 
 # 云端客户端（延迟初始化）
 oai_client: Optional[OpenAI] = None
 if not USE_LOCAL_QWEN:
-    if not API_KEY or API_KEY == "sk-82107b037f5847ee90deb81f6f976e0f":
+    if not API_KEY:
         raise RuntimeError("使用云端模式需设置有效的 DASHSCOPE_API_KEY")
     oai_client = OpenAI(
         api_key=API_KEY,
@@ -38,6 +38,17 @@ def _get_local_qwen():
             print(f"[omni_client] 本地千问加载失败: {e}，回退到云端模式")
             raise
     return _local_qwen_client
+
+
+def preload_local_qwen_on_startup() -> bool:
+    """在应用启动阶段预加载本地千问模型到内存。"""
+    if not USE_LOCAL_QWEN:
+        print("[omni_client] 当前为云端模式，跳过本地模型预加载")
+        return False
+
+    _get_local_qwen()
+    print("[omni_client] 本地千问预加载完成")
+    return True
 
 class OmniStreamPiece:
     """对外的统一增量数据：text/audio 二选一或同时。"""

@@ -32,6 +32,10 @@ import mediapipe as mp
 import bridge_io
 import threading
 import yolomedia  # 确保和 app_main.py 同目录，文件名就是 yolomedia.py
+
+# ---- 项目根目录 ----
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # ---- Windows 事件循环策略 ----
 if sys.platform.startswith("win"):
     try:
@@ -42,14 +46,23 @@ if sys.platform.startswith("win"):
 # ---- .env ----
 try:
     from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    pass
+    dotenv_path = os.path.join(BASE_DIR, ".env")
+    loaded = load_dotenv(dotenv_path=dotenv_path, override=False)
+    print(f"[ENV] .env loaded={loaded}, path={dotenv_path}")
+    print(
+        "[ENV] USE_LOCAL_QWEN=%s, LOCAL_QWEN_MODEL_PATH=%s"
+        % (
+            os.getenv("USE_LOCAL_QWEN", "<unset>"),
+            os.getenv("LOCAL_QWEN_MODEL_PATH", "<unset>"),
+        )
+    )
+except Exception as e:
+    print(f"[ENV] 加载 .env 失败: {e}")
 
 # ---- DashScope ASR 基础 ----
 from dashscope import audio as dash_audio  # 若未安装，会在原项目里抛错提示
 
-API_KEY = os.getenv("DASHSCOPE_API_KEY", "sk-82107b037f5847ee90deb81f6f976e0f")
+API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
 if not API_KEY:
     raise RuntimeError("未设置 DASHSCOPE_API_KEY")
 
@@ -69,11 +82,14 @@ from audio_stream import (
     is_playing_now,
     current_ai_task,
 )
-from omni_client import stream_chat, OmniStreamPiece
+from omni_client import stream_chat, OmniStreamPiece, preload_local_qwen_on_startup
 from asr_core import (
     ASRCallback,
     set_current_recognition,
     stop_current_recognition,
+    pause_current_recognition,
+    resume_current_recognition,
+    register_asr_pause_resume,
 )
 from audio_player import initialize_audio_system, play_voice_text
 # ---- Agent 模块 ----
@@ -94,6 +110,7 @@ import audio_test_launcher
 # ---- IMU UDP ----
 UDP_IP   = "0.0.0.0"
 UDP_PORT = 12345
+MODEL_DIR = os.path.join(BASE_DIR, "model")
 
 app = FastAPI()
 
@@ -140,7 +157,7 @@ def load_navigation_models():
     global yolo_seg_model, obstacle_detector
 
     try:
-        seg_model_path = os.getenv("BLIND_PATH_MODEL", r"D:\\AIProject\\Blind_for_Navigation\\model\\yolo-seg.pt")
+        seg_model_path = os.getenv("BLIND_PATH_MODEL", os.path.join(MODEL_DIR, "yolo-seg.pt"))
         #print(f"[NAVIGATION] 尝试加载模型: {seg_model_path}")
 
         if os.path.exists(seg_model_path):
@@ -173,7 +190,7 @@ def load_navigation_models():
             print(f"[NAVIGATION] 请检查文件路径是否正确")
             
         # 【修改开始】使用 ObstacleDetectorClient 替代直接的 YOLO
-        obstacle_model_path = os.getenv("OBSTACLE_MODEL", r"C:\Users\Administrator\Desktop\rebuild1002\model\yoloe-11l-seg.pt")
+        obstacle_model_path = os.getenv("OBSTACLE_MODEL", os.path.join(MODEL_DIR, "yoloe-11l-seg.pt"))
         print(f"[NAVIGATION] 尝试加载障碍物检测模型: {obstacle_model_path}")
         
         if os.path.exists(obstacle_model_path):
@@ -768,6 +785,9 @@ async def start_ai_with_text_custom(user_text: str):
 # ========= Omni 播放启动 =========
 async def start_ai_with_text(user_text: str):
     """硬重置后，开启新的 AI 语音输出。"""
+    # 播报前暂停 ASR，避免把播报语音回采成输入
+    await pause_current_recognition()
+
     # 异步更新用户长期记忆
     asyncio.create_task(asyncio.to_thread(memory_manager.update, user_text))
     
@@ -902,14 +922,22 @@ async def start_ai_with_text(user_text: str):
             except Exception:
                 pass
 
+            # 播报结束后恢复 ASR，确保下一轮语音输入可继续被接收
+            await resume_current_recognition()
+
     # 真正启动前先硬重置，保证**绝无**旧音频残留
-    await hard_reset_audio("start_ai_with_text")
-    loop = asyncio.get_running_loop()
-    from audio_stream import current_ai_task as _task_holder  # 读写模块内全局
-    from audio_stream import __dict__ as _as_dict
-    # 设置模块内的 current_ai_task
-    task = loop.create_task(_runner())
-    _as_dict["current_ai_task"] = task
+    try:
+        await hard_reset_audio("start_ai_with_text")
+        loop = asyncio.get_running_loop()
+        from audio_stream import current_ai_task as _task_holder  # 读写模块内全局
+        from audio_stream import __dict__ as _as_dict
+        # 设置模块内的 current_ai_task
+        task = loop.create_task(_runner())
+        _as_dict["current_ai_task"] = task
+    except Exception:
+        # 若启动流程中途失败，避免 ASR 被永久暂停
+        await resume_current_recognition()
+        raise
 
 # ---------- 页面 / 健康 ----------
 @app.get("/", response_class=HTMLResponse)
@@ -1103,7 +1131,7 @@ async def start_webcamera(request: dict):
     """
     global webcam_active, webcam_handler
 
-    camera_id = request.get("camera_id", 0)
+    camera_id = request.get("camera_id", int(os.getenv("WEBCAM_ID", "0")))
     width = request.get("width", 640)
     height = request.get("height", 480)
 
@@ -1412,6 +1440,52 @@ async def ws_audio(ws: WebSocket):
         if send_notice:
             try: await ws.send_text(send_notice)
             except Exception: pass
+
+    async def start_rec(send_notice: Optional[str] = None):
+        nonlocal recognition, streaming, keepalive_task, last_ts
+        if recognition is not None and streaming:
+            return
+
+        loop = asyncio.get_running_loop()
+        def post(coro):
+            asyncio.run_coroutine_threadsafe(coro, loop)
+
+        # 组装 ASR 回调（把依赖都注入）
+        cb = ASRCallback(
+            on_sdk_error=lambda s: post(on_sdk_error(s)),
+            post=post,
+            ui_broadcast_partial=ui_broadcast_partial_with_tts_check,
+            ui_broadcast_final=ui_broadcast_final_with_tts_check,
+            is_playing_now_fn=is_playing_now,
+            start_ai_with_text_fn=start_ai_with_text_custom,
+            full_system_reset_fn=full_system_reset,
+            interrupt_lock=interrupt_lock,
+        )
+
+        recognition = dash_audio.asr.Recognition(
+            api_key=API_KEY, model=MODEL, format=AUDIO_FMT,
+            sample_rate=SAMPLE_RATE, callback=cb
+        )
+        recognition.start()
+        await set_current_recognition(recognition)
+        streaming = True
+        last_ts = time.monotonic()
+        keepalive_task = asyncio.create_task(keepalive_loop())
+
+        if send_notice:
+            try:
+                await ws.send_text(send_notice)
+            except Exception:
+                pass
+
+    async def pause_rec_for_tts():
+        await stop_rec()
+
+    async def resume_rec_after_tts():
+        if ws.client_state == WebSocketState.CONNECTED:
+            await start_rec()
+
+    register_asr_pause_resume(pause_rec_for_tts, resume_rec_after_tts)
 
     async def on_sdk_error(_msg: str):
         await stop_rec(send_notice="RESTART")
@@ -2165,11 +2239,12 @@ async def on_startup_audio_tests():
     """启动时自动启动音频测试（麦克风、扬声器）"""
     def _start():
         try:
-            audio_test_launcher.start_audio_tests(wait_for_server=False)
+            # 启动阶段有模型预加载，给服务就绪检测更长等待时间。
+            audio_test_launcher.start_audio_tests(wait_for_server=True, startup_timeout=120)
         except Exception as e:
             print(f"[AUDIO_TEST] 启动失败: {e}")
 
-    # 延迟 2 秒启动，确保服务器已就绪
+    # 延迟触发后台线程，避免阻塞 startup 事件。
     threading.Timer(2.0, _start).start()
 
 @app.on_event("startup")
@@ -2188,6 +2263,12 @@ async def on_startup():
         print("[STARTUP] 测试结果目录已创建")
     except Exception as e:
         print(f"[STARTUP] 创建测试结果目录失败: {e}")
+
+    # 启动阶段预加载本地千问，避免首轮对话卡在模型加载
+    try:
+        preload_local_qwen_on_startup()
+    except Exception as e:
+        print(f"[STARTUP] 本地千问预加载失败，将保留懒加载回退: {e}")
 
 @app.on_event("shutdown")
 async def on_shutdown():
@@ -2216,7 +2297,7 @@ def get_last_frames():
     return last_frames
 
 def get_camera_ws():
-    return esp32_camera_ws
+    return None
 
 if __name__ == "__main__":
     print("[STARTUP] 启动 HTTP:8081")
