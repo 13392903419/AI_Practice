@@ -28,9 +28,6 @@ def _get_recorder():
             _recorder_imported = True  # 标记已尝试，避免重复
     return _sync_recorder
 
-# 旧路径保留作为备份（不使用）
-# AUDIO_BASE_DIR = r"D:AIProject\Blind_for_Navigation\music"
-
 # 新增：voice 目录与映射表
 # 使用脚本所在目录的 voice 文件夹，避免工作目录问题
 VOICE_DIR = os.getenv("VOICE_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "voice"))
@@ -513,9 +510,6 @@ def _synthesize_and_play(text: str):
             thread = threading.Thread(target=play_local_tts, daemon=True)
             thread.start()
             return
-
-        # 【Edge-TTS 已移除】不再支持 Edge-TTS 和 DashScope TTS
-        # 如果需要其他 TTS 引擎，请直接在此添加
 
         print(f"[TTS] TTS 合成失败")
 
