@@ -1130,7 +1130,6 @@ async def start_webcamera(request: dict):
         if cross_street_navigator is None and yolo_seg_model is not None:
             cross_street_navigator = CrossStreetNavigator(
                 seg_model=yolo_seg_model,
-                coco_model=None,
                 obs_model=None
             )
 
@@ -1783,7 +1782,6 @@ async def ws_test_camera(ws: WebSocket):
     if cross_street_navigator is None and yolo_seg_model is not None:
         cross_street_navigator = CrossStreetNavigator(
             seg_model=yolo_seg_model,
-            coco_model=None,
             obs_model=None
         )
         print("[TEST_CAMERA] 过马路导航器已初始化")

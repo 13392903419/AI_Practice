@@ -5,17 +5,17 @@ import torch
 from threading import Semaphore
 from contextlib import contextmanager
 from typing import List
-from app.cloud.obstacle_detector_client import ObstacleDetectorClient
 # ==========================================================
 # 0. 导入所有需要的模型封装类 (Clients) 和 Ultralytics 基类
 # ==========================================================
-# 这是过马路工作流使用的封装类
-from app.cloud.crosswalk_detector_client import CrosswalkDetector
-from app.cloud.coco_perception_client import COCOClient
+# 通用的障碍物检测器（所有工作流共享）
 from obstacle_detector_client import ObstacleDetectorClient
 
-# 这是盲道工作流直接使用的 Ultralytics 类
+# 盲道工作流和过马路工作流直接使用的 Ultralytics 类
 from ultralytics import YOLO, YOLOE
+
+# 注意：过马路工作流不再使用 CrosswalkDetector/COCOClient，
+# 而是直接使用通用的 YOLO 分割模型进行斑马线和盲道检测
 
 logger = logging.getLogger(__name__)
 
@@ -64,10 +64,7 @@ except Exception:
 # 2. 全局模型实例定义 (全部初始化为 None)
 # ==========================================================
 
-# --- 过马路工作流模型 (通过Client类封装) ---
-crosswalk_detector_client: CrosswalkDetector = None
-coco_client: COCOClient = None
-# ObstacleDetectorClient 将作为所有场景的通用障碍物检测器
+# --- 通用障碍物检测器 (所有工作流共享) ---
 obstacle_detector_client: ObstacleDetectorClient = None
 
 # --- 盲道工作流模型 (直接使用Ultralytics类) ---
@@ -95,40 +92,24 @@ def init_all_models():
     logger.info(f"========= 🚀 开始全局模型预加载 (目标设备: {DEVICE}) =========")
 
     try:
-        # --- [1] 加载通用的障碍物检测器 (ObstacleDetectorClient) ---
-        global obstacle_detector_client
-        logger.info("[1/4] 正在加载通用障碍物检测模型 (ObstacleDetectorClient)...")
+        # --- [1] 加载通用分割模型 (盲道+过马路共享) ---
+        global blindpath_seg_model
+        logger.info("[1/2] 正在加载通用分割模型 (YOLO)...")
+        blindpath_seg_model = YOLO('models/yolo-seg.pt')
+        blindpath_seg_model.to(DEVICE)
+        blindpath_seg_model.fuse()
+        logger.info("...通用分割模型加载成功（盲道和过马路工作流共享）。")
+
+        # --- [2] 加载通用障碍物检测器 (ObstacleDetectorClient) ---
+        global obstacle_detector_client, blindpath_whitelist_embeddings
+        logger.info("[2/2] 正在加载通用障碍物检测模型 (ObstacleDetectorClient)...")
         obstacle_detector_client = ObstacleDetectorClient(model_path='models/yoloe-11l-seg.pt')
 
-        # 🔥🔥🔥 【核心修复】在这里添加缺失的设备转移代码 🔥🔥🔥
+        # 将模型移动到指定设备
         if hasattr(obstacle_detector_client, 'model') and obstacle_detector_client.model is not None:
             obstacle_detector_client.model.to(DEVICE)
 
         logger.info("...通用障碍物检测模型加载成功。")
-
-        # --- [2] 加载过马路专用的模型 (Clients) ---
-        global crosswalk_detector_client, coco_client
-        logger.info("[2/4] 正在加载过马路分割模型 (CrosswalkDetector)...")
-        crosswalk_detector_client = CrosswalkDetector(model_path='models/yolo-seg.pt')
-        # 将其内部的YOLO模型移动到指定设备
-        if hasattr(crosswalk_detector_client, 'model') and crosswalk_detector_client.model is not None:
-            crosswalk_detector_client.model.to(DEVICE)
-        logger.info("...过马路分割模型加载成功。")
-
-        logger.info("[3/4] 正在加载通用感知模型 (COCOClient)...")
-        coco_client = COCOClient(model_path='models/yolov8l-world.pt')
-        # 将其内部的YOLO模型移动到指定设备
-        if hasattr(coco_client, 'model') and coco_client.model is not None:
-            coco_client.model.to(DEVICE)
-        logger.info("...通用感知模型加载成功。")
-
-        # --- [4] 加载盲道专用的模型 ---
-        global blindpath_seg_model, blindpath_whitelist_embeddings
-        logger.info("[4/4] 正在加载盲道专用分割模型 (YOLO)...")
-        blindpath_seg_model = YOLO('models/yolo-seg.pt')
-        blindpath_seg_model.to(DEVICE)
-        blindpath_seg_model.fuse()
-        logger.info("...盲道专用分割模型加载成功。")
 
         # 为盲道工作流保存其需要的YOLOE文本特征引用
         if obstacle_detector_client:

@@ -21,15 +21,15 @@ class LocalQwenClient:
     """本地千问多模态客户端"""
 
     def __init__(self,
-                 model_path: str = "Qwen/Qwen2-VL-7B-Instruct",
+                 model_path: str = "Qwen/Qwen2-VL-2B-Instruct",
                  device_map: str = "auto"):
         """
         初始化本地千问模型
 
         Args:
             model_path: 模型路径，支持本地路径或 HuggingFace 模型 ID
-                       推荐本地路径: "D:/models/Qwen2-VL-7B-Instruct"
-                       或 HuggingFace: "Qwen/Qwen2-VL-7B-Instruct"
+                       推荐本地路径: "D:/models/Qwen2-VL-2B-Instruct"
+                       或 HuggingFace: "Qwen/Qwen2-VL-2B-Instruct"
             device_map: 设备映射，"auto" 自动选择 GPU
         """
         self.model_path = model_path
@@ -294,7 +294,7 @@ def get_local_qwen() -> LocalQwenClient:
     if _local_qwen_instance is None:
         model_path = os.getenv(
             "LOCAL_QWEN_MODEL_PATH",
-            "Qwen/Qwen2-VL-7B-Instruct"  # 默认 HuggingFace 模型 ID
+            "Qwen/Qwen2-VL-2B-Instruct"  # 默认 HuggingFace 模型 ID
         )
         _local_qwen_instance = LocalQwenClient(model_path=model_path)
 

@@ -202,7 +202,7 @@ def _cls_of(d):
 class CrossStreetNavigator:
     """简化版过马路导航器 - 仅斑马线检测但保留导航（每帧分割 + 失败用光流保活）"""
 
-    def __init__(self, seg_model=None, coco_model=None, obs_model=None, device_id: str = "esp32"):
+    def __init__(self, seg_model=None, obs_model=None, device_id: str = "esp32"):
         self.seg_model = seg_model
         self.device_id = device_id
         self.frame_counter = 0
