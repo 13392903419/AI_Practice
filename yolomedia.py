@@ -143,15 +143,15 @@ YOLO_CORRECTION_IOU_THRESHOLD = 0.2  # IoU阈值，越低越积极矫正
 YOLO_CORRECTION_CONF_THRESHOLD = 0.15  # 置信度阈值，越低检测越敏感
 
 # ========= 方向引导音频路径 =========
-AUDIO_DIR = r"E:\沙粒云\自媒体\2025视频制作\20250925AI眼镜\AI眼镜合并\audio"  # 请修改为实际路径
+AUDIO_DIR = r"D:\AIProject\Blind_for_Navigation\music" 
 AUDIO_FILES = {
-    "向上": os.path.join(AUDIO_DIR, "up.wav"),
-    "向下": os.path.join(AUDIO_DIR, "down.wav"),
-    "向左": os.path.join(AUDIO_DIR, "left.wav"),
-    "向右": os.path.join(AUDIO_DIR, "right.wav"),
-    "向前": os.path.join(AUDIO_DIR, "forward.wav"),
-    "后退": os.path.join(AUDIO_DIR, "backward.wav"),
-    "OK": os.path.join(AUDIO_DIR, "ok.wav"),  # 添加OK音效
+    "向上": os.path.join(AUDIO_DIR, "向上.wav"),
+    "向下": os.path.join(AUDIO_DIR, "向下.wav"),
+    "向左": os.path.join(AUDIO_DIR, "向左.wav"),
+    "向右": os.path.join(AUDIO_DIR, "向右.wav"),
+    "向前": os.path.join(AUDIO_DIR, "向前.wav"),
+    "向后": os.path.join(AUDIO_DIR, "向后.wav"),
+    "拿到啦": os.path.join(AUDIO_DIR, "拿到啦.wav"),  # 添加OK音效
 }
 GUIDANCE_INTERVAL_SEC = 1.5  # 引导播报间隔
 
@@ -724,11 +724,8 @@ def main(headless: bool = False, prompt_name: str = None, stop_event=None):
     print(f"[CLASS] target id={target_cls_id}, name={id_to_name.get(target_cls_id, 'N/A')}")
     print(f"[阈值] conf >= {CONF_THRESHOLD:.2f}")
 
-    # Hand Landmarker（暂时禁用，因为初始化会卡住）
-    landmarker = None
-    print("[INIT] 跳过 Hand Landmarker 初始化（手部检测暂不可用）")
-    # TODO: 修复 MediaPipe Hand Landmarker 初始化卡住的问题
-    """
+
+    landmarker = True
     try:
         base = BaseOptions(model_asset_path=HAND_TASK_PATH)
         hand_options = HandLandmarkerOptions(
@@ -745,11 +742,10 @@ def main(headless: bool = False, prompt_name: str = None, stop_event=None):
     except Exception as e:
         print(f"[WARNING] Hand Landmarker 初始化失败: {e}")
         print("[WARNING] 手部检测功能将不可用，但物品查找仍可正常工作")
-    """
+
 
     W = None
     H = None
-    print("[Bridge] 等待 ESP32 画面 ...")
 
     # [headless] 仅在非 headless 时创建窗口（原逻辑保留，外层加判断）
     if not headless:

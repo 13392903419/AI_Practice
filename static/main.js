@@ -8,7 +8,6 @@
   const $finalList = document.getElementById('finalList');
   const $btnClear  = document.getElementById('btnClear');
   const $btnWebcam = document.getElementById('btnWebcam');
-  // 【ESP32 已禁用】const $btnRe     = document.getElementById('btnReconnect');
   const $fps       = document.getElementById('fps');
   const canvas     = document.getElementById('canvas');
   const ctx        = canvas.getContext('2d');
@@ -369,8 +368,6 @@
       }
     }
   };
-
-  // 【ESP32 已禁用】$btnRe.onclick    = ()=> { connectCamera(); connectASR(); };
 
   // 默认启动电脑摄像头（不等待 ESP32）
   async function initDefaultCamera() {
