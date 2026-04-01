@@ -3,19 +3,7 @@
 from typing import List, Tuple
 import os
 from openai import OpenAI
-
-# —— 本地优先映射（可随时扩充/改名）——
-LOCAL_CN2EN = {
-    "红牛": "Red_Bull",
-    "ad钙奶": "AD_milk",
-    "ad 钙奶": "AD_milk",
-    "ad": "AD_milk",
-    "钙奶": "AD_milk",
-    "矿泉水": "bottle",
-    "水瓶": "bottle",
-    "可乐": "coke",
-    "雪碧": "sprite",
-}
+from utils import ITEM_TO_CLASS_MAP
 
 def _make_client() -> OpenAI:
     # 复用你百炼兼容端点；支持从环境变量读取
@@ -35,11 +23,11 @@ def extract_english_label(query_cn: str) -> Tuple[str, str]:
     返回 (label_en, source)；source ∈ {'local', 'qwen', 'fallback'}
     """
     q = (query_cn or "").strip().lower()
-    if q in LOCAL_CN2EN:
-        return LOCAL_CN2EN[q], "local"
+    if q in ITEM_TO_CLASS_MAP:
+        return ITEM_TO_CLASS_MAP[q], "local"
 
     # 简单规则：去掉前缀修饰词
-    for k, v in LOCAL_CN2EN.items():
+    for k, v in ITEM_TO_CLASS_MAP.items():
         if k in q:
             return v, "local"
 

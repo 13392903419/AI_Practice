@@ -4,7 +4,6 @@
 电脑摄像头处理模块
 - 使用 OpenCV 打开摄像头
 - 复用现有导航逻辑进行帧处理
-- 独立于 ESP32，可在本地运行
 """
 import cv2
 import asyncio

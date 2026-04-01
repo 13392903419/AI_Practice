@@ -24,7 +24,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 from obstacle_detector_client import ObstacleDetectorClient
-
+from utils import ITEM_TO_CLASS_MAP
 import torch  # 添加这行
 
 
@@ -302,79 +302,6 @@ yolomedia_thread: Optional[threading.Thread] = None
 yolomedia_stop_event = threading.Event()
 yolomedia_running = False
 yolomedia_sending_frames = False  # 新增：标记YOLO是否已经开始发送处理后的帧
-
-# 物品名称到YOLO类别的映射
-ITEM_TO_CLASS_MAP = {
-    # ===== 项目里已有商品别名 =====
-    "AD钙奶": "AD_milk",
-    "ad钙奶": "AD_milk",
-    "钙奶": "AD_milk",
-    # ===== 饮料与常见包装 =====
-    "矿泉水": "water bottle",
-    "矿泉水瓶": "water bottle",
-    "瓶装水": "water bottle",
-    "纯净水": "water bottle",
-    "可乐": "soda can",
-    "可乐罐": "soda can",
-    "雪碧": "soda can",
-    "芬达": "soda can",
-    "红牛": "energy drink can",
-    "功能饮料": "energy drink can",
-    "牛奶": "milk carton",
-    "牛奶盒": "milk carton",
-    "盒装牛奶": "milk carton",
-    "薯片": "chips bag",
-    "薯片袋": "chips bag",
-    "纸巾": "tissue box",
-    "纸巾盒": "tissue box",
-    "抽纸": "tissue box",
-    "方便面": "instant noodle cup",
-    "泡面": "instant noodle cup",
-    "泡面杯": "instant noodle cup",
-    # ===== 高频日用品 =====
-    "杯子": "cup",
-    "马克杯": "cup",
-    "碗": "bowl",
-    "勺子": "spoon",
-    "汤勺": "spoon",
-    "牙刷": "toothbrush",
-    "手机": "smartphone",
-    "电话": "smartphone",
-    "遥控器": "remote control",
-    "遥控板": "remote control",
-    "键盘": "keyboard",
-    "鼠标": "mouse",
-    "背包": "backpack",
-    "书包": "backpack",
-    "雨伞": "umbrella",
-    "眼镜": "glasses",
-     # ===== 家具与几何形态明显目标 =====
-    "椅子": "chair",
-    "凳子": "chair",
-    "桌子": "table",
-    "瓶子": "bottle",
-    "书": "book",
-    "书本": "book",
-    "箱子": "box",
-    "纸箱": "box",
-    "行李箱": "suitcase",
-    "垃圾桶": "trash can",
-    "显示器": "monitor",
-    # ===== 交通与场景大类 =====
-    "汽车": "car",
-    "小汽车": "car",
-    "自行车": "bicycle",
-    "单车": "bicycle",
-    "摩托车": "motorcycle",
-    "电动车": "motorcycle",
-    "公交车": "bus",
-    "巴士": "bus",
-    "红绿灯": "traffic light",
-    "斑马线": "crosswalk",
-    "门": "door",
-    "楼梯": "stairs",
-
-}
 
 async def ui_broadcast_raw(msg: str):
     dead = []
@@ -1099,7 +1026,7 @@ webcam_active = False
 webcam_handler: WebcamHandler = None
 
 def _webcam_frame_processor(frame):
-    
+
     frame = cv2.flip(frame, 1)  # 加这行
     """电脑摄像头帧处理函数 - 使用优化处理器"""
     global orchestrator, yolomedia_running, last_frames
