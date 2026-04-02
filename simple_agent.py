@@ -4,19 +4,18 @@
 轻量级盲人导航 Agent
 - 无需 LangGraph/LangChain 等外部框架
 - 直接复用现有模块 (navigation_master, omni_client, memory_manager)
-- 基于 LLM 的意图识别 + 工具调用
+- 硬热词路由 + 本地 LLM（Qwen2-VL-2B）
 """
 import os
-import json
 import asyncio
 import logging
 from typing import Dict, Any, Optional, List, Callable
 from dataclasses import dataclass
-from openai import OpenAI
 
 # 现有模块
 from navigation_master import NavigationMaster
 from memory_manager import memory_manager
+from local_qwen_client import get_local_qwen
 
 logger = logging.getLogger(__name__)
 
@@ -40,124 +39,86 @@ class AgentResponse:
     state: Optional[str] = None  # 导航状态
 
 
-# ========== 意图识别 ==========
-class IntentRecognizer:
-    """基于 LLM 的意图识别器"""
+# ========== 硬热词表定义 ==========
+HOTWORD_ROUTES = {
+    # blindpath（盲道导航）
+    "blindpath": {
+        "start": ["开始导航", "盲道导航", "启动导航", "开始盲道"],
+        "stop": ["停止导航", "结束导航"],
+    },
+    # cross_street（过马路）
+    "cross_street": {
+        "start": ["开始过马路", "过马路", "我要过马路"],
+        "stop": ["过马路结束", "过完了", "已经过去了"],
+    },
+    # traffic_light（红绿灯检测）
+    "traffic_light": {
+        "start": ["检测红绿灯", "看红绿灯", "启动红绿灯"],
+        "stop": ["停止检测", "停止红绿灯"],
+    },
+    # find_object（找物品 - 需要 LLM 提取物品名称）
+    "find_object": {
+        "keywords": ["找", "帮我找", "寻找"],
+    },
+    # find_object 结束（拿到了、找到了）
+    "find_object_end": {
+        "keywords": ["拿到了", "找到了"],
+    },
+    # save_route（记录目的地）
+    "save_route": {
+        "keywords": ["我经常去"],
+    },
+}
 
-    # 可用意图/工具映射
-    INTENT_PROMPT = """你是盲人导航助手的意图识别模块。
 
-用户输入: "{user_input}"
+def _fast_hotword_route(text: str) -> tuple[Optional[str], Dict[str, Any]]:
+    """
+    快速热词路由 - 直接返回 intent + params，不调 LLM
+    返回: (intent, params) 或 (None, {}) 表示没命中热词
+    """
+    text = text.strip()
 
-{memory_context}
+    # ========= 盲道导航 =========
+    for keyword in HOTWORD_ROUTES["blindpath"]["start"]:
+        if keyword in text:
+            return "blindpath", {"action": "start"}
+    for keyword in HOTWORD_ROUTES["blindpath"]["stop"]:
+        if keyword in text:
+            return "blindpath", {"action": "stop"}
 
-请识别用户意图并返回 JSON 格式（仅返回JSON，不要其他内容）：
-{{
-    "intent": "工具名称",
-    "params": {{"参数名": "参数值"}},
-    "confidence": 0.9
-}}
+    # ========= 过马路 =========
+    for keyword in HOTWORD_ROUTES["cross_street"]["start"]:
+        if keyword in text:
+            return "cross_street", {"action": "start"}
+    for keyword in HOTWORD_ROUTES["cross_street"]["stop"]:
+        if keyword in text:
+            return "cross_street", {"action": "stop"}
 
-可用工具:
-- blindpath: 盲道导航 (params: {{"action": "start/stop/status"}})
-- cross_street: 过马路 (params: {{"direction": "forward/left/right"}})
-- find_object: 找物品 (params: {{"target": "物品名称"}})
-- detect_obstacle: 检测障碍物 (params: {}})
-- traffic_light: 红绿灯检测 (params: {}})
-- save_route: 记录路线 (params: {{"destination": "目的地"}})
-- chat: 闲聊/问答 (params: {}})
+    # ========= 红绿灯检测 =========
+    for keyword in HOTWORD_ROUTES["traffic_light"]["start"]:
+        if keyword in text:
+            return "traffic_light", {"action": "start"}
+    for keyword in HOTWORD_ROUTES["traffic_light"]["stop"]:
+        if keyword in text:
+            return "traffic_light", {"action": "stop"}
 
-示例:
-输入: "启动盲道导航"
-输出: {{"intent": "blindpath", "params": {{"action": "start"}}, "confidence": 0.95}}
+    # ========= 找物品结束 =========
+    for keyword in HOTWORD_ROUTES["find_object_end"]["keywords"]:
+        if keyword in text:
+            return "find_object_end", {}
 
-输入: "我要过马路"
-输出: {{"intent": "cross_street", "params": {{"direction": "forward"}}, "confidence": 0.9}}
+    # ========= 找物品（需要 LLM 提取名称）=========
+    for keyword in HOTWORD_ROUTES["find_object"]["keywords"]:
+        if keyword in text:
+            return "find_object", {}
 
-输入: "帮我找电梯"
-输出: {{"intent": "find_object", "params": {{"target": "电梯"}}, "confidence": 0.85}}
+    # ========= 保存路线 =========
+    for keyword in HOTWORD_ROUTES["save_route"]["keywords"]:
+        if keyword in text:
+            return "save_route", {}
 
-输入: "前面有什么"
-输出: {{"intent": "detect_obstacle", "params": {{}}, "confidence": 0.8}}
-"""
-
-    def __init__(self, api_key: str):
-        self.client = OpenAI(
-            api_key=api_key,
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
-        )
-
-    def recognize(self, user_input: str) -> tuple[str, Dict[str, Any], float]:
-        """
-        识别用户意图
-        返回: (intent_name, params, confidence)
-        """
-        try:
-            memory_context = memory_manager.get_context()
-            # 使用 f-string 直接构建，避免格式化问题
-            prompt = f"""你是盲人导航助手的意图识别模块。
-
-用户输入: "{user_input}"
-
-{memory_context if memory_context else ""}
-
-请识别用户意图并返回 JSON 格式（仅返回JSON，不要其他内容）：
-{{
-    "intent": "工具名称",
-    "params": {{"参数名": "参数值"}},
-    "confidence": 0.9
-}}
-
-可用工具:
-- blindpath: 盲道导航 (params: {{"action": "start/stop/status"}})
-- cross_street: 过马路 (params: {{"direction": "forward/left/right"}})
-- find_object: 找物品 (params: {{"target": "物品名称"}})
-- detect_obstacle: 检测障碍物 (params: {{}})
-- traffic_light: 红绿灯检测 (params: {{}})
-- save_route: 记录路线 (params: {{"destination": "目的地"}})
-- chat: 闲聊/问答 (params: {{}})
-
-示例:
-输入: "启动盲道导航"
-输出: {{"intent": "blindpath", "params": {{"action": "start"}}, "confidence": 0.95}}
-
-输入: "我要过马路"
-输出: {{"intent": "cross_street", "params": {{"direction": "forward"}}, "confidence": 0.9}}
-
-输入: "帮我找电梯"
-输出: {{"intent": "find_object", "params": {{"target": "电梯"}}, "confidence": 0.85}}
-
-输入: "前面有什么"
-输出: {{"intent": "detect_obstacle", "params": {{}}, "confidence": 0.8}}
-"""
-
-            response = self.client.chat.completions.create(
-                model="qwen-turbo",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=200
-            )
-
-            content = response.choices[0].message.content.strip()
-
-            # 尝试解析 JSON
-            # 处理可能的 markdown 代码块
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0].strip()
-
-            result = json.loads(content)
-            return result.get("intent", "chat"), result.get("params", {}), result.get("confidence", 0.0)
-
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSON 解析失败: {content}, error: {e}")
-            return "chat", {}, 0.0
-        except Exception as e:
-            import traceback
-            logger.error(f"意图识别失败: {e}")
-            traceback.print_exc()
-            return "chat", {}, 0.0
+    # 没命中任何热词 → 交给 chat
+    return None, {}
 
 
 # ========== 工具执行器 ==========
@@ -227,26 +188,55 @@ class ToolExecutor:
 
     async def _tool_cross_street(self, params: Dict[str, Any]) -> str:
         """过马路工具"""
-        direction = params.get("direction", "forward")
-        direction_text = {"forward": "前方", "left": "左侧", "right": "右侧"}.get(direction, "前方")
+        action = params.get("action", "start")
 
-        # 使用 NavigationMaster 的方法启动过马路
-        self.nav_master.start_crossing()
-        return f"准备过马路，正在帮您寻找{direction_text}的斑马线..."
+        if action == "start":
+            self.nav_master.start_crossing()
+            return "准备过马路，正在帮您寻找斑马线..."
+        elif action == "stop":
+            # 停止过马路，切回盲道导航
+            self.nav_master.start_blind_path_navigation()
+            return "已结束过马路模式，恢复盲道导航。"
+        else:
+            return "过马路: 未知指令"
 
-    async def _tool_find_object(self, params: Dict[str, Any]) -> str:
-        """物品查找工具"""
-        target = params.get("target", "")
+async def _tool_find_object(self, params: Dict[str, Any]) -> str:
+    """物品查找工具 - 整合长期记忆"""
+    target = params.get("target", "")
+    
+    if not target:
+        return "请告诉我您要找什么物品"
+    
+    # ========= 新增：查询长期记忆 =========
+    memory_context = memory_manager.get_context()
+    if memory_context:
+        # 用 LLM 从记忆中研究用户的特定偏好
+        qwen = get_local_qwen()
+        prompt = f"""从用户的长期记忆中找出与"{target}"相关的具体物品。
 
-        if not target:
-            return "请告诉我您要找什么物品"
+用户长期记忆：
+{memory_context}
 
-        # 使用 NavigationMaster 的方法启动找物品
-        self.nav_master.start_item_search()
+用户现在说: "帮我找{target}"
 
-        # TODO: 集成 yolomedia.py 的物品查找逻辑
-        # 这里先返回简单响应，后续可以扩展
-        return f"正在帮您找{target}，请把镜头转向周围..."
+请根据记忆，返回用户最可能想找的具体物品名称（只返回物品名，不要解释）。
+如果记忆中没有相关信息，就返回用户说的词本身。
+"""
+        try:
+            refined_target = await qwen.chat(
+                message=prompt,
+                max_tokens=20,
+                temperature=0.1
+            )
+            refined_target = refined_target.strip()
+            logger.info(f"[物品优化] '{target}' -> '{refined_target}'（基于长期记忆）")
+            target = refined_target
+        except Exception as e:
+            logger.warning(f"长期记忆查询失败，使用原始目标: {e}")
+    
+    # 启动找物品
+    self.nav_master.start_item_search()
+    return f"正在帮您找{target}，请把镜头转向周围..."
 
     async def _tool_detect_obstacle(self, params: Dict[str, Any]) -> str:
         """障碍物检测工具"""
@@ -257,35 +247,40 @@ class ToolExecutor:
 
     async def _tool_traffic_light(self, params: Dict[str, Any]) -> str:
         """红绿灯检测工具"""
-        # 使用 NavigationMaster 的方法启动红绿灯检测
-        self.nav_master.start_traffic_light_detection()
-        return "正在检测红绿灯状态..."
+        action = params.get("action", "start")
+
+        if action == "start":
+            self.nav_master.start_traffic_light_detection()
+            return "正在检测红绿灯状态..."
+        elif action == "stop":
+            self.nav_master.stop_navigation()
+            return "已停止红绿灯检测。"
+        else:
+            return "红绿灯检测: 未知指令"
+
+    async def _tool_find_object_end(self, params: Dict[str, Any]) -> str:
+        """结束找物品"""
+        self.nav_master.stop_item_search(restore_nav=True)
+        return "已结束物品查找，恢复导航模式。"
 
     async def _tool_save_route(self, params: Dict[str, Any]) -> str:
-        """记录路线工具"""
+        """记录路线工具 - 只保存，不回复"""
         destination = params.get("destination", "")
 
-        if not destination:
-            return "请告诉我目的地名称"
+        if destination:
+            memory_manager.update(f"我经常去{destination}")
+            logger.info(f"[记忆保存] 已记录目的地: {destination}")
 
-        # 保存到记忆
-        memory_manager.update(f"我经常去{destination}")
-        return f"已记录目的地: {destination}"
+        # 不返回任何回复，保持简洁
+        return ""
 
     async def _tool_chat(self, params: Dict[str, Any], user_input: str = "") -> str:
-        """闲聊/问答工具"""
-        # 使用 LLM 生成响应
-        client = OpenAI(
-            api_key=os.getenv("DASHSCOPE_API_KEY"),
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
-        )
+        """闲聊/问答工具 - 使用本地 Qwen 模型"""
+        try:
+            memory_context = memory_manager.get_context()
+            query = user_input or params.get("query", "")
 
-        memory_context = memory_manager.get_context()
-
-        # 使用 user_input 而不是 params.get("query", "")
-        query = user_input or params.get("query", "")
-
-        prompt = f"""你是盲人导航助手，请用简洁友好的语言回答用户问题。
+            prompt = f"""你是盲人导航助手，请用简洁友好的语言回答用户问题。
 
 {memory_context}
 
@@ -293,15 +288,16 @@ class ToolExecutor:
 
 请给出简短回答（不超过50字）。"""
 
-        try:
-            response = client.chat.completions.create(
-                model="qwen-turbo",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=100
+            # 使用本地 Qwen2-VL-2B 模型（已在 app_main 启动时预加载）
+            qwen = get_local_qwen()
+            response = await qwen.chat(
+                message=prompt,
+                max_tokens=100,
+                temperature=0.7
             )
-            return response.choices[0].message.content.strip()
+            return response.strip()
         except Exception as e:
+            logger.error(f"本地 Qwen 聊天失败: {e}")
             return "抱歉，我现在无法回答这个问题。"
 
 
@@ -316,17 +312,13 @@ class SimpleAgent:
     """
 
     def __init__(self, api_key: Optional[str] = None):
-        api_key = api_key or os.getenv("DASHSCOPE_API_KEY", "")
-        if not api_key:
-            raise ValueError("未设置 DASHSCOPE_API_KEY")
-
-        self.intent_recognizer = IntentRecognizer(api_key)
+        # api_key 现在只用于备用，实际不需要（LLM 调用用本地或 DashScope）
         self.tool_executor = ToolExecutor()
-        logger.info("SimpleAgent 初始化完成")
+        logger.info("SimpleAgent 初始化完成（硬热词路由模式）")
 
     async def process(self, request: AgentRequest) -> AgentResponse:
         """
-        处理用户请求
+        处理用户请求 - 硬热词路由模式
         返回: AgentResponse
         """
         user_input = request.user_input.strip()
@@ -335,17 +327,33 @@ class SimpleAgent:
             return AgentResponse(text="请告诉我您需要什么帮助")
 
         try:
-            # 1. 意图识别
-            intent, params, confidence = self.intent_recognizer.recognize(user_input)
-            logger.info(f"意图识别: {intent}, params: {params}, confidence: {confidence}")
+            # ========= 步骤 1: 快速热词路由 =========
+            intent, params = _fast_hotword_route(user_input)
 
-            # 2. 工具执行（传递 user_input）
+            # 如果是 find_object，需要 LLM 提取物品名称
+            if intent == "find_object":
+                target = await self._extract_object_name(user_input)
+                params = {"target": target}
+
+            # 如果是 save_route，需要提取目的地
+            elif intent == "save_route":
+                destination = self._extract_destination(user_input)
+                params = {"destination": destination}
+
+            # 如果没命中热词，走 chat（LLM 文本对话）
+            if intent is None:
+                intent = "chat"
+
+            logger.info(f"[快速路由] 意图={intent}, params={params}")
+
+            # ========= 步骤 2: 工具执行 =========
             result_text = await self.tool_executor.execute(intent, params, user_input)
 
-            # 3. 更新记忆
-            memory_manager.update(user_input)
+            # ========= 步骤 3: 更新记忆（save_route 自己处理，不额外更新） =========
+            if intent != "save_route":
+                memory_manager.update(user_input)
 
-            # 4. 获取当前状态
+            # ========= 步骤 4: 获取当前状态 =========
             current_state = None
             if self.tool_executor.nav_master:
                 current_state = self.tool_executor.nav_master.get_state()
@@ -362,6 +370,59 @@ class SimpleAgent:
             return AgentResponse(
                 text=f"抱歉，处理请求时出现错误: {str(e)}"
             )
+
+    async def _extract_object_name(self, user_input: str) -> str:
+        """
+        从用户输入中用 LLM 提取物品名称
+        例: "帮我找电梯" → "电梯"
+             "找一个钥匙" → "钥匙"
+        """
+        try:
+            qwen = get_local_qwen()
+            prompt = f"""从用户的话中提取要找的物品名称。
+
+用户话: "{user_input}"
+
+请只返回物品名称（1-5个字），不要其他内容。例如:
+输入: "帮我找一个电梯"
+输出: 电梯
+
+输入: "找钥匙"
+输出: 钥匙
+"""
+            target = await qwen.chat(
+                message=prompt,
+                max_tokens=20,
+                temperature=0.1
+            )
+            target = target.strip()
+            logger.info(f"[物品提取] '{user_input}' → '{target}'")
+            return target
+        except Exception as e:
+            logger.error(f"物品提取失败: {e}")
+            return "物品"
+
+    def _extract_destination(self, user_input: str) -> str:
+        """
+        从用户输入中提取目的地
+        例: "我经常去松江印象城" → "松江印象城"
+        只保存，不返回回复
+        """
+        keyword = "我经常去"
+        if keyword not in user_input:
+            return ""
+
+        # 简单算法：取 "我经常去" 后面的所有字符（去掉标点）
+        idx = user_input.find(keyword)
+        if idx == -1:
+            return ""
+
+        destination = user_input[idx + len(keyword):].strip()
+        # 去掉末尾标点
+        destination = destination.rstrip("。！？，、；：")
+
+        logger.info(f"[目的地提取] '{user_input}' → '{destination}'")
+        return destination
 
     async def process_stream(self, request: AgentRequest):
         """

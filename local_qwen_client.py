@@ -170,8 +170,8 @@ class LocalQwenClient:
         with torch.no_grad():
             generated_ids = self.model.generate(
                 **inputs,
-                max_new_tokens=max_tokens,
-                temperature=temperature,
+                max_new_tokens=128,
+                temperature=0.2,
                 do_sample=True,
             )
 

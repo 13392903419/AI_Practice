@@ -652,7 +652,16 @@ def get_center_guidance(object_center, frame_center, threshold=30):
     else:
         return "向上" if dy > 0 else "向下", False  # 对调了
 
-def main(headless: bool = False, prompt_name: str = None, stop_event=None):
+def main(headless: bool = False, prompt_name: str = None, stop_event=None, yoloe_backend=None):
+    """
+    YOLO 物品查找主函数
+
+    Args:
+        headless: 是否无头模式（不显示窗口）
+        prompt_name: 要查找的物品名称
+        stop_event: 停止事件
+        yoloe_backend: 外部传入的 YoloEBackend 实例（单例模式，避免重复加载）
+    """
 
     # OpenCV 优化
     try:
@@ -669,8 +678,8 @@ def main(headless: bool = False, prompt_name: str = None, stop_event=None):
     global PROMPT_NAME
     if prompt_name:
         PROMPT_NAME = prompt_name
-        print(f"[YOLOMEDIA] Using dynamic prompt: {PROMPT_NAME}")
-    
+        print(f"[YOLOMEDIA] Using dynamic prompt: {PROMPT_NAME}", flush=True)
+
     speaker = Speaker(ENABLE_TTS)
     last_tts_ts = 0.0
     MODE = "SEGMENT"  # 模式：SEGMENT -> FLASH -> CENTER_GUIDE -> TRACK
@@ -693,10 +702,18 @@ def main(headless: bool = False, prompt_name: str = None, stop_event=None):
     # NOTE: shoppingbest 不再用于找东西流程；如其他模式仍需，可保留 yolo = YOLO(...) 但不在本流程使用
     # yolo = YOLO(YOLO_MODEL_PATH)
 
-    # —— 直接启用 YOLOE 文本提示后端（不再先查 shoppingbest）——
+    # —— 直接启用 YOLOE 文本提示后端（优先使用外部传入的单例）——
     use_yoloe = False
-    yoloe_backend = None
-    if _YOLOE_READY:
+    if yoloe_backend is not None:
+        # 使用外部传入的单例实例（推荐路径，避免重复加载模型）
+        try:
+            yoloe_backend.set_text_classes([PROMPT_NAME])  # 只切换类别，不重新加载模型
+            use_yoloe = True
+            print(f"[DETECTOR] Using external YOLOE singleton for: {PROMPT_NAME}", flush=True)
+        except Exception as e:
+            print(f"[DETECTOR] External YOLOE set_text_classes failed: {e}", flush=True)
+    elif _YOLOE_READY:
+        # 回退路径：如果未传入外部实例，则创建新实例（旧逻辑，保留兼容性）
         try:
             yoloe_backend = YoloEBackend()                  # 可用 YOLOE_MODEL_PATH 环境变量指定模型
             yoloe_backend.set_text_classes([PROMPT_NAME])   # 文本类别

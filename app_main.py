@@ -303,6 +303,34 @@ yolomedia_stop_event = threading.Event()
 yolomedia_running = False
 yolomedia_sending_frames = False  # 新增：标记YOLO是否已经开始发送处理后的帧
 
+# ============== YOLOE 单例（找物品模式专用）==================
+_yoloe_backend_singleton = None  # 全局单例，避免重复加载
+_yoloe_backend_lock = threading.Lock()
+
+def get_yoloe_backend_singleton():
+    """
+    获取 YoloEBackend 单例（线程安全）
+
+    单例模式：首次调用时创建实例，之后直接复用
+    切换物品时只需调用 set_text_classes()，无需重新加载模型
+    """
+    global _yoloe_backend_singleton
+    with _yoloe_backend_lock:
+        if _yoloe_backend_singleton is None:
+            try:
+                from yoloe_backend import YoloEBackend
+                print("[YOLOE_SINGLETON] 正在初始化全局 YOLOE 单例...")
+                _yoloe_backend_singleton = YoloEBackend()
+                # 首帧预热：用空图跑一次推理，避免首次真实推理时的显存分配抖动
+                import numpy as np
+                dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                _yoloe_backend_singleton.segment(dummy_frame)
+                print("[YOLOE_SINGLETON] 全局 YOLOE 单例初始化并预热完成")
+            except Exception as e:
+                print(f"[YOLOE_SINGLETON] 初始化失败: {e}")
+                _yoloe_backend_singleton = None
+        return _yoloe_backend_singleton
+
 async def ui_broadcast_raw(msg: str):
     dead = []
     for k, ws in list(ui_clients.items()):
@@ -398,55 +426,64 @@ async def full_system_reset(reason: str = ""):
 
 # ========= 启动/停止 YOLO 媒体处理 =========
 def start_yolomedia_with_target(target_name: str):
-    """启动yolomedia线程，搜索指定物品"""
+    """启动yolomedia线程，搜索指定物品（使用 YOLOE 单例，避免重复加载模型）"""
     global yolomedia_thread, yolomedia_stop_event, yolomedia_running, yolomedia_sending_frames
-    
+
     # 如果已经在运行，先停止
     if yolomedia_running:
         stop_yolomedia()
-    
+
+    # 获取 YOLOE 单例实例（线程安全）
+    yoloe_backend = get_yoloe_backend_singleton()
+    if yoloe_backend is None:
+        print("[YOLOMEDIA] 警告：YOLOE 单例初始化失败，物品查找可能无法正常工作", flush=True)
+
     # 查找对应的YOLO类别
     yolo_class = ITEM_TO_CLASS_MAP.get(target_name, target_name)
     print(f"[YOLOMEDIA] Starting with target: {target_name} -> YOLO class: {yolo_class}", flush=True)
     print(f"[YOLOMEDIA] Available mappings: {ITEM_TO_CLASS_MAP}", flush=True)  # 添加这行调试
-    
+
     yolomedia_stop_event.clear()
     yolomedia_running = True
     yolomedia_sending_frames = False  # 重置发送帧状态
-    
+
     def _run():
         try:
-            # 传递目标类别名和停止事件
-            yolomedia.main(headless=True, prompt_name=yolo_class, stop_event=yolomedia_stop_event)
+            # 传递目标类别名、停止事件和 YOLOE 单例实例
+            yolomedia.main(headless=True, prompt_name=yolo_class, stop_event=yolomedia_stop_event, yoloe_backend=yoloe_backend)
         except Exception as e:
             print(f"[YOLOMEDIA] worker stopped: {e}", flush=True)
         finally:
             global yolomedia_running, yolomedia_sending_frames
             yolomedia_running = False
             yolomedia_sending_frames = False
-    
+
     yolomedia_thread = threading.Thread(target=_run, daemon=True)
     yolomedia_thread.start()
     print(f"[YOLOMEDIA] background worker started for: {yolo_class}（正在初始化，暂时显示原始画面）", flush=True)
 
 def stop_yolomedia():
-    """停止yolomedia线程"""
+    """
+    停止 yolomedia 线程（非阻塞模式）
+
+    优化：将 join 超时从 5 秒缩短为 0.3 秒，避免切换模式时长时间卡顿
+    旧线程会在后台自行退出，不会影响新的模式切换
+    """
     global yolomedia_thread, yolomedia_stop_event, yolomedia_running, yolomedia_sending_frames
-    
+
     if yolomedia_running:
         print("[YOLOMEDIA] Stopping worker...", flush=True)
         yolomedia_stop_event.set()
-        
-        # 等待线程结束（最多等5秒）
+
+        # 非阻塞等待：只等 300ms，避免卡顿
+        # 旧线程会在 daemon=True 模式下后台自行退出
         if yolomedia_thread and yolomedia_thread.is_alive():
-            yolomedia_thread.join(timeout=5.0)
-        
+            yolomedia_thread.join(timeout=0.3)
+
         yolomedia_running = False
         yolomedia_sending_frames = False
-        
-        # 【新增】如果orchestrator在找物品模式，结束时不自动恢复（由命令控制）
-        # 只清理标志位即可
-        print("[YOLOMEDIA] Worker stopped, 等待状态切换.", flush=True)
+
+        print("[YOLOMEDIA] Worker stop signal sent, 等待状态切换.", flush=True)
 
 # ========= 自定义的 start_ai_with_text，支持识别特殊命令 ==========
 # 全局变量：Chat 模式是否启用
@@ -1770,7 +1807,7 @@ async def on_startup_audio_tests():
 async def on_startup_preload_model():
     if _startup_done:
         return
-    """启动时预加载 LocalQwen 模型"""
+    """启动时预加载重型模型（LocalQwen + YOLOE 单例）"""
     def _preload():
         try:
             from local_qwen_client import get_local_qwen
@@ -1778,7 +1815,17 @@ async def on_startup_preload_model():
             _ = get_local_qwen()
             print("[MODEL] LocalQwen 模型预加载完成")
         except Exception as e:
-            print(f"[MODEL] 预加载失败: {e}")
+            print(f"[MODEL] LocalQwen 预加载失败: {e}")
+
+        try:
+            # 预加载 YOLOE 单例（找物品模式专用）
+            yoloe_backend = get_yoloe_backend_singleton()
+            if yoloe_backend:
+                print("[MODEL] YOLOE 单例预加载完成")
+            else:
+                print("[MODEL] YOLOE 单例预加载失败")
+        except Exception as e:
+            print(f"[MODEL] YOLOE 单例预加载失败: {e}")
 
     # 延迟 5 秒启动，给音频系统留出时间，避免资源竞争
     threading.Timer(5.0, _preload).start()
