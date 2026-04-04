@@ -101,8 +101,8 @@ class LocalQwenClient:
         message: str,
         images: Optional[List[Union[np.ndarray, str, bytes]]] = None,
         history: Optional[List[Dict[str, Any]]] = None,
-        max_tokens: int = 512,
-        temperature: float = 0.7,
+        max_tokens: int = 128,
+        temperature: float = 0.2,
     ) -> str:
         """
         异步聊天接口
@@ -197,8 +197,8 @@ class LocalQwenClient:
         message: str,
         images: Optional[List[Union[np.ndarray, str, bytes]]] = None,
         history: Optional[List[Dict[str, Any]]] = None,
-        max_tokens: int = 512,
-        temperature: float = 0.7,
+        max_tokens: int = 128,
+        temperature: float = 0.2,
     ) -> AsyncGenerator[str, None]:
         """
         异步流式聊天接口（简化版，暂不支持真正的流式输出）

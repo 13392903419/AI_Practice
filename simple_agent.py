@@ -200,19 +200,18 @@ class ToolExecutor:
         else:
             return "过马路: 未知指令"
 
-async def _tool_find_object(self, params: Dict[str, Any]) -> str:
-    """物品查找工具 - 整合长期记忆"""
-    target = params.get("target", "")
-    
-    if not target:
-        return "请告诉我您要找什么物品"
-    
-    # ========= 新增：查询长期记忆 =========
-    memory_context = memory_manager.get_context()
-    if memory_context:
-        # 用 LLM 从记忆中研究用户的特定偏好
-        qwen = get_local_qwen()
-        prompt = f"""从用户的长期记忆中找出与"{target}"相关的具体物品。
+    async def _tool_find_object(self, params: Dict[str, Any]) -> str:
+        """物品查找工具 - 整合长期记忆"""
+        target = params.get("target", "")
+
+        if not target:
+            return "请告诉我您要找什么物品"
+
+        # 查询长期记忆，将泛化词（如“饮料”）细化为用户偏好目标
+        memory_context = memory_manager.get_context()
+        if memory_context:
+            qwen = get_local_qwen()
+            prompt = f"""从用户的长期记忆中找出与"{target}"相关的具体物品。
 
 用户长期记忆：
 {memory_context}
@@ -222,26 +221,23 @@ async def _tool_find_object(self, params: Dict[str, Any]) -> str:
 请根据记忆，返回用户最可能想找的具体物品名称（只返回物品名，不要解释）。
 如果记忆中没有相关信息，就返回用户说的词本身。
 """
-        try:
-            refined_target = await qwen.chat(
-                message=prompt,
-                max_tokens=20,
-                temperature=0.1
-            )
-            refined_target = refined_target.strip()
-            logger.info(f"[物品优化] '{target}' -> '{refined_target}'（基于长期记忆）")
-            target = refined_target
-        except Exception as e:
-            logger.warning(f"长期记忆查询失败，使用原始目标: {e}")
-    
-    # 启动找物品
-    self.nav_master.start_item_search()
-    return f"正在帮您找{target}，请把镜头转向周围..."
+            try:
+                refined_target = await qwen.chat(
+                    message=prompt,
+                    max_tokens=20,
+                    temperature=0.1
+                )
+                refined_target = refined_target.strip()
+                logger.info(f"[物品优化] '{target}' -> '{refined_target}'（基于长期记忆）")
+                target = refined_target
+            except Exception as e:
+                logger.warning(f"长期记忆查询失败，使用原始目标: {e}")
+
+        self.nav_master.start_item_search()
+        return f"正在帮您找{target}，请把镜头转向周围..."
 
     async def _tool_detect_obstacle(self, params: Dict[str, Any]) -> str:
         """障碍物检测工具"""
-        # 查询当前障碍物情况
-        # TODO: 从 NavigationMaster 获取当前障碍物信息
         state = self.nav_master.get_state()
         return f"正在检测前方障碍物...当前状态: {state}"
 
@@ -271,7 +267,6 @@ async def _tool_find_object(self, params: Dict[str, Any]) -> str:
             memory_manager.update(f"我经常去{destination}")
             logger.info(f"[记忆保存] 已记录目的地: {destination}")
 
-        # 不返回任何回复，保持简洁
         return ""
 
     async def _tool_chat(self, params: Dict[str, Any], user_input: str = "") -> str:
@@ -288,12 +283,11 @@ async def _tool_find_object(self, params: Dict[str, Any]) -> str:
 
 请给出简短回答（不超过50字）。"""
 
-            # 使用本地 Qwen2-VL-2B 模型（已在 app_main 启动时预加载）
             qwen = get_local_qwen()
             response = await qwen.chat(
                 message=prompt,
                 max_tokens=100,
-                temperature=0.7
+                temperature=0.2
             )
             return response.strip()
         except Exception as e:
