@@ -9,6 +9,7 @@ import time
 import cv2
 import numpy as np
 import logging
+import threading
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 from collections import deque
@@ -190,7 +191,7 @@ class BlindPathNavigator:
         self.prev_obstacle_cache = []
         self.last_guidance_message = ""
         self.last_detected_obstacles = []
-        self.last_obstacle_detection_frame = 0
+        self.last_obstacle_detection_time = 0.0   # 时间戳（秒）
         self.last_any_speech_time = 0
         
         # 斑马线准备状态标志
@@ -229,15 +230,20 @@ class BlindPathNavigator:
         self.CROSSWALK_SWITCH_BOTTOM_RATIO = 0.9
         self.CROSSWALK_SWITCH_CONSECUTIVE_FRAMES = 10
         
-        # 障碍物检测间隔
-        # 障碍物检测优化参数 - 从环境变量读取，支持性能调优
-        self.OBSTACLE_DETECTION_INTERVAL = int(os.getenv("AIGLASS_OBS_INTERVAL", "15"))  # 默认每5帧检测一次
-        self.OBSTACLE_CACHE_DURATION_FRAMES = int(os.getenv("AIGLASS_OBS_CACHE_FRAMES", "10"))  # 缓存10帧
+        # 障碍物检测间隔（时间制：每 N 秒最多检测一次，避免慢模型阻塞显示线程）
+        self.OBSTACLE_INTERVAL_SECS = float(os.getenv("AIGLASS_OBS_INTERVAL_SECS", "3.0"))
+        self.OBSTACLE_CACHE_DURATION_SECS = self.OBSTACLE_INTERVAL_SECS + 1.0  # 缓存略长于间隔
         
         # 障碍物播报管理
         self.last_obstacle_speech = ""
         self.last_obstacle_speech_time = 0
         self.obstacle_speech_cooldown = 5.0  # 相同障碍物3秒内不重复播报
+        
+        # 【方案B】障碍物后台线程 —— yoloe 在独立线程异步推理，不阻塞主 YOLO 线程
+        self._obs_lock = threading.Lock()
+        self._obs_pending_image = None       # 待检测的图像（由主线程写入）
+        self._obs_pending_mask = None        # 对应的 path_mask
+        self._obs_thread_started = False
         
         # 掩码稳定化参数（已禁用光流外推，这些参数不再使用）
         self.MASK_STAB_MIN_AREA = int(os.getenv("AIGLASS_MASK_MIN_AREA", "1500"))
@@ -288,7 +294,7 @@ class BlindPathNavigator:
         # 如果有 YOLO 模型，优先使用
         if self.traffic_light_yolo:
             try:
-                results = self.traffic_light_yolo.predict(image, verbose=False, conf=0.3)
+                results = self.traffic_light_yolo.predict(image, verbose=False, conf=0.3, imgsz=320, half=True)
                 # TODO: 解析 YOLO 结果，判断红绿灯颜色
                 pass
             except:
@@ -398,12 +404,62 @@ class BlindPathNavigator:
         # 其他指令 - 默认中等优先级
         return 30
 
+    def _start_obstacle_thread(self):
+        """启动障碍物后台检测线程（仅启动一次）"""
+        if self._obs_thread_started or not self.obstacle_detector:
+            return
+        self._obs_thread_started = True
+        t = threading.Thread(target=self._obstacle_worker, daemon=True, name="obs-detect")
+        t.start()
+        logger.info("[OBS-THREAD] 障碍物后台检测线程已启动")
+
+    def _obstacle_worker(self):
+        """后台线程：循环检测障碍物，每次检测完休息 OBSTACLE_INTERVAL_SECS"""
+        while True:
+            # 取最新待检测帧
+            img = None
+            mask = None
+            with self._obs_lock:
+                if self._obs_pending_image is not None:
+                    img = self._obs_pending_image
+                    mask = self._obs_pending_mask
+                    self._obs_pending_image = None
+                    self._obs_pending_mask = None
+
+            if img is None:
+                time.sleep(0.1)
+                continue
+
+            try:
+                t0 = time.time()
+                detected = self._detect_obstacles(img, mask)
+                dt = (time.time() - t0) * 1000
+                # 原子更新结果
+                self.last_detected_obstacles = detected
+                self.last_obstacle_detection_time = time.time()
+                logger.info(f"[OBS-THREAD] 检测完成: {len(detected)} 个障碍物, 耗时 {dt:.0f}ms")
+            except Exception as e:
+                logger.error(f"[OBS-THREAD] 检测失败: {e}")
+
+            # 等待间隔再检测下一次
+            time.sleep(self.OBSTACLE_INTERVAL_SECS)
+
+    def _submit_obstacle_detection(self, image: np.ndarray, path_mask):
+        """提交一帧给后台障碍物线程（非阻塞，只保留最新的）"""
+        if not self.obstacle_detector:
+            return
+        self._start_obstacle_thread()
+        with self._obs_lock:
+            self._obs_pending_image = image.copy()
+            self._obs_pending_mask = path_mask.copy() if path_mask is not None else None
+
     def process_frame(self, image: np.ndarray) -> ProcessingResult:
         """
         处理单帧图像
         :param image: BGR格式的图像
         :return: 处理结果
         """
+        _pf_t0 = time.time()
         self.frame_counter += 1
         
         # 更新冷却期
@@ -421,7 +477,9 @@ class BlindPathNavigator:
         guidance_text = ""
         
         # 1. 【修改为实时检测】每帧都进行YOLO检测，不使用缓存
+        _pf_t1 = time.time()
         blind_path_mask, crosswalk_mask = self._detect_path_and_crosswalk(image)
+        _pf_t2 = time.time()
         
         # 【调试】检查YOLO检测结果
         if self.frame_counter % 30 == 0:  # 每30帧打印一次
@@ -446,34 +504,28 @@ class BlindPathNavigator:
             after_stab = crosswalk_mask is not None and np.sum(crosswalk_mask > 0) > 0
             logger.info(f"[掩码稳定化] 斑马线稳定化后: {'有' if after_stab else '无（被过滤）'}")
         
-        # 【新增】3. 全程障碍物检测
-        # 无论在什么状态下，都进行障碍物检测
-        logger.info(f"[Frame {self.frame_counter}] 开始障碍物检测...")
+        # 【新增】3. 全程障碍物检测（后台线程异步推理，不阻塞主线程）
+        _pf_t3 = time.time()
         
-        # 使用缓存策略，但确保所有障碍物都被可视化
-        if self.frame_counter % self.OBSTACLE_DETECTION_INTERVAL == 0:
-            detected_obstacles = self._detect_obstacles(image, blind_path_mask)
-            self.last_detected_obstacles = detected_obstacles
-            self.last_obstacle_detection_frame = self.frame_counter
-            logger.info(f"[Frame {self.frame_counter}] 执行了新的障碍物检测，检测到 {len(detected_obstacles)} 个障碍物")
-        else:
-            if self.frame_counter - self.last_obstacle_detection_frame < self.OBSTACLE_CACHE_DURATION_FRAMES:
-                detected_obstacles = self.last_detected_obstacles
-                logger.info(f"[Frame {self.frame_counter}] 使用缓存的障碍物数据，共 {len(detected_obstacles)} 个障碍物")
-            else:
-                detected_obstacles = []
-                logger.info(f"[Frame {self.frame_counter}] 缓存过期，无障碍物数据")
+        # 提交给后台线程异步检测（非阻塞），直接使用上次缓存的结果
+        self._submit_obstacle_detection(image, blind_path_mask)
+        detected_obstacles = self.last_detected_obstacles
+        
+        if self.frame_counter % 30 == 0:
+            logger.info(f"[Frame {self.frame_counter}] 使用后台线程缓存的障碍物数据，共 {len(detected_obstacles)} 个障碍物")
         
         # 添加所有障碍物的可视化（不只是近距离的）
         for i, obs in enumerate(detected_obstacles):
-            logger.info(f"  障碍物 {i+1}: {obs.get('name', 'unknown')}, "
-                    f"bottom_y_ratio={obs.get('bottom_y_ratio', 0):.2f}, "
-                    f"area_ratio={obs.get('area_ratio', 0):.3f}, "
-                    f"位置=({obs.get('center_x', 0):.0f}, {obs.get('center_y', 0):.0f})")
+            if self.frame_counter % 30 == 0:
+                logger.info(f"  障碍物 {i+1}: {obs.get('name', 'unknown')}, "
+                        f"bottom_y_ratio={obs.get('bottom_y_ratio', 0):.2f}, "
+                        f"area_ratio={obs.get('area_ratio', 0):.3f}, "
+                        f"位置=({obs.get('center_x', 0):.0f}, {obs.get('center_y', 0):.0f})")
             self._add_obstacle_visualization(obs, frame_visualizations)
         
         # 【新增】检查近距离障碍物并设置语音
         self._check_and_set_obstacle_voice(detected_obstacles)
+        _pf_t4 = time.time()
         
         # 【新增】斑马线感知处理
         # 先检查crosswalk_mask状态
@@ -769,6 +821,12 @@ class BlindPathNavigator:
         annotated_image = self._draw_command_button(annotated_image, current_instruction)
         
         # 8. 返回结果
+        _pf_t5 = time.time()
+        if self.frame_counter % 5 == 0:
+            print(f"[BLINDPATH-TIMING] yolo_seg={(_pf_t2-_pf_t1)*1000:.0f}ms "
+                  f"obstacle={(_pf_t4-_pf_t3)*1000:.0f}ms "
+                  f"rest={(_pf_t5-_pf_t4)*1000:.0f}ms "
+                  f"total={(_pf_t5-_pf_t0)*1000:.0f}ms", flush=True)
         return ProcessingResult(
             guidance_text=guidance_text,
             visualizations=frame_visualizations,
@@ -799,7 +857,7 @@ class BlindPathNavigator:
         
         try:
             min_conf = min(self.CLASS_CONF_THRESHOLDS.values())
-            results = self.yolo_model.predict(image, verbose=False, conf=min_conf, classes=[0, 1])
+            results = self.yolo_model.predict(image, verbose=False, conf=min_conf, classes=[0, 1], imgsz=320, half=True)
             
             if (results and results[0] and results[0].masks is not None and 
                 results[0].boxes is not None and len(results[0].masks.data) > 0):
@@ -1289,11 +1347,8 @@ class BlindPathNavigator:
     
     def _handle_crosswalk_approaching(self, frame_visualizations, image_height, image_width, image):
         """处理接近斑马线的情况"""
-        # 障碍物检测
-        if self.obstacle_detector and self.frame_counter % self.OBSTACLE_DETECTION_INTERVAL == 0:
-            detected_obstacles = self._detect_obstacles(image)
-            self.last_detected_obstacles = detected_obstacles
-            self.last_obstacle_detection_frame = self.frame_counter
+        # 障碍物检测（后台线程异步处理，这里只提交和读取缓存）
+        self._submit_obstacle_detection(image, None)
         
         # 添加障碍物可视化
         for obs in self.last_detected_obstacles:
@@ -2054,27 +2109,10 @@ class BlindPathNavigator:
             self.pending_obstacle_voice = None
 
     def _check_obstacles(self, image, mask, frame_visualizations):
-        """检查并处理障碍物"""
-        # 使用缓存策略
-        if self.frame_counter % self.OBSTACLE_DETECTION_INTERVAL == 0:
-            final_obstacles = self._detect_obstacles(image, mask)
-            # 【新增】稳定化障碍物，避免重复叠加
-            if hasattr(self, 'prev_gray') and self.prev_gray is not None:
-                curr_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-                final_obstacles = self._stabilize_obstacle_list(
-                    final_obstacles, 
-                    self.last_detected_obstacles,
-                    self.prev_gray,
-                    curr_gray,
-                    image.shape[:2]
-                )
-            self.last_detected_obstacles = final_obstacles
-            self.last_obstacle_detection_frame = self.frame_counter
-        else:
-            if self.frame_counter - self.last_obstacle_detection_frame < self.OBSTACLE_CACHE_DURATION_FRAMES:
-                final_obstacles = self.last_detected_obstacles
-            else:
-                final_obstacles = []
+        """检查并处理障碍物（后台线程异步推理，这里只提交和读缓存）"""
+        # 提交给后台线程（非阻塞）
+        self._submit_obstacle_detection(image, mask)
+        final_obstacles = self.last_detected_obstacles
         
         # 添加可视化
         for obs in final_obstacles:
@@ -3137,7 +3175,7 @@ class BlindPathNavigator:
         self.prev_obstacle_cache = []
         self.last_guidance_message = ""
         self.last_detected_obstacles = []
-        self.last_obstacle_detection_frame = 0
+        self.last_obstacle_detection_time = 0.0
         self.last_obstacle_speech = ""
         self.last_obstacle_speech_time = 0
         self.last_any_speech_time = 0

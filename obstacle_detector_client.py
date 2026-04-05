@@ -107,7 +107,7 @@ class ObstacleDetectorClient:
 
         conf_thr = float(os.getenv("AIGLASS_OBS_CONF", "0.25"))
         with gpu_infer_slot():
-            results = self.model.predict(image, verbose=False, conf=conf_thr)
+            results = self.model.predict(image, verbose=False, conf=conf_thr, imgsz=320, half=True)
 
         if not (results and results[0].masks):
             return []

@@ -479,7 +479,7 @@ document.addEventListener('click', function _unlockAudio() {
 
       cameraWs.onopen = () => {
         console.log('[Camera] WebSocket 推帧已连接');
-        // 每 66ms 推一帧（约 15fps）
+        // 每 66ms 推一帧（约 15fps，显示与YOLO已分离不会阻塞）
         cameraFrameTimer = setInterval(() => {
           if (cameraWs.readyState !== WebSocket.OPEN) return;
           const vw = cameraVideo.videoWidth, vh = cameraVideo.videoHeight;

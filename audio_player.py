@@ -479,7 +479,7 @@ def play_voice_text(text: str):
         return
 
     # 【新增】TTS 合成：对于未知的语音，使用 TTS 合成
-    if USE_TTS_FOR_UNKNOWN and len(text) <= 200:  # 限制长度，避免过长文本
+    if USE_TTS_FOR_UNKNOWN and len(text) <= 100:  # 限制长度，避免过长文本
         print(f"[AUDIO] 使用 TTS 合成语音: {text[:30]}...")
         # 直接调用，内部已用线程处理，无需 asyncio.create_task
         _synthesize_and_play(text)

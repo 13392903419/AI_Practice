@@ -47,20 +47,35 @@ class LocalQwenClient:
         model_path = self.model_path.replace('\\', '/')
         is_local = os.path.exists(self.model_path)
 
+        # 检测 GPU 是否支持 bfloat16（需要 compute capability >= 8.0）
+        if torch.cuda.is_available():
+            cc = torch.cuda.get_device_capability()
+            if cc[0] >= 8:
+                dtype = torch.bfloat16
+                print(f"[LocalQwen] GPU compute capability {cc[0]}.{cc[1]}, 使用 bfloat16")
+            else:
+                dtype = torch.float16
+                print(f"[LocalQwen] GPU compute capability {cc[0]}.{cc[1]}, 使用 float16")
+        else:
+            dtype = torch.float32
+            print("[LocalQwen] 无 GPU, 使用 float32")
+
         # 加载模型
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
             model_path,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=dtype,
             device_map=self.device_map,
             trust_remote_code=True,
             local_files_only=is_local
         ).eval()
 
-        # 加载处理器
+        # 加载处理器（限制视觉 token 数量，加速推理）
         self.processor = AutoProcessor.from_pretrained(
             model_path,
             trust_remote_code=True,
-            local_files_only=is_local
+            local_files_only=is_local,
+            min_pixels=128 * 28 * 28,    # 最小 ~100K 像素
+            max_pixels=256 * 28 * 28,    # 最大 ~200K 像素（约 450x450）
         )
 
         elapsed = time.time() - start
@@ -130,14 +145,21 @@ class LocalQwenClient:
                     # 文件路径
                     content.append({"type": "image", "image": img})
                 elif isinstance(img, np.ndarray):
-                    # numpy 数组转为 PIL
+                    # numpy 数组转为 PIL，并缩小到 448x336 减少 visual tokens
                     if len(img.shape) == 3 and img.shape[2] == 3:
                         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                     pil_img = Image.fromarray(img)
+                    # 限制最大尺寸
+                    max_side = 448
+                    if max(pil_img.size) > max_side:
+                        pil_img.thumbnail((max_side, max_side), Image.LANCZOS)
                     content.append({"type": "image", "image": pil_img})
                 elif isinstance(img, bytes):
-                    # bytes 转 PIL
+                    # bytes 转 PIL，并缩小
                     pil_img = Image.open(BytesIO(img))
+                    max_side = 448
+                    if max(pil_img.size) > max_side:
+                        pil_img.thumbnail((max_side, max_side), Image.LANCZOS)
                     content.append({"type": "image", "image": pil_img})
                 else:
                     # PIL 图像直接使用
@@ -170,9 +192,9 @@ class LocalQwenClient:
         with torch.no_grad():
             generated_ids = self.model.generate(
                 **inputs,
-                max_new_tokens=128,
-                temperature=0.2,
-                do_sample=True,
+                max_new_tokens=max_tokens,
+                do_sample=temperature > 0.1,
+                temperature=temperature if temperature > 0.1 else None,
             )
 
         # 解码

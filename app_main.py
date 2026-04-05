@@ -574,6 +574,17 @@ async def start_ai_with_text_custom(user_text: str):
                 # 传递 orchestrator 给 Agent
                 agent.tool_executor.set_nav_master(orchestrator)
 
+            # 先用快速热词路由，不调 LLM
+            from simple_agent import _fast_hotword_route
+            intent, params = _fast_hotword_route(user_text)
+
+            if intent is None:
+                # 没命中任何热词，非 chat 模式下直接丢弃（不浪费 LLM）
+                print(f"[AGENT] 未命中热词，丢弃: {user_text}")
+                await ui_broadcast_final(f"[系统] 已识别: {user_text}（说'小慧小慧启动'开启对话模式）")
+                return
+
+            # 命中热词，走 Agent 处理（不会调 LLM）
             agent_request = AgentRequest(user_input=user_text, input_type="voice")
             agent_response = await agent.process(agent_request)
 
@@ -894,13 +905,20 @@ async def start_ai_with_text(user_text: str):
                         if pcm8k:
                             await broadcast_pcm16_realtime(pcm8k)
 
-            # 【本地 TTS】如果没有云端音频，使用 pyttsx3 播放完整文本
+            # 【本地 TTS】如果没有云端音频，使用 Edge TTS 播放完整文本
             if not has_cloud_audio:
                 final_text = ("".join(txt_buf)).strip()
                 if final_text:
-                    print(f"[TTS] 使用本地 TTS 播放: {final_text[:30]}...", flush=True)
-                    # 使用已有的 play_voice_text 函数（它内部处理 pyttsx3）
-                    play_voice_text(final_text)
+                    # 清理 markdown 格式，保留纯文本给 TTS
+                    import re
+                    tts_text = re.sub(r'\*\*([^*]+)\*\*', r'\1', final_text)  # **粗体** → 粗体
+                    tts_text = re.sub(r'\*([^*]+)\*', r'\1', tts_text)        # *斜体* → 斜体
+                    tts_text = re.sub(r'^\s*\d+\.\s*', '', tts_text, flags=re.MULTILINE)  # 去编号
+                    tts_text = re.sub(r'^\s*[-•]\s*', '', tts_text, flags=re.MULTILINE)    # 去列表符
+                    tts_text = re.sub(r'\n{2,}', '。', tts_text)  # 多行换行 → 句号
+                    tts_text = tts_text.replace('\n', '，').strip()
+                    print(f"[TTS] 使用 TTS 合成语音: {tts_text[:30]}...", flush=True)
+                    play_voice_text(tts_text)
 
         except asyncio.CancelledError:
             # 被新一轮打断
@@ -1077,61 +1095,8 @@ webcam_active = False
 webcam_handler: WebcamHandler = None
 
 def _webcam_frame_processor(frame):
-
-    frame = cv2.flip(frame, 1)  # 加这行
-    """电脑摄像头帧处理函数 - 使用优化处理器"""
-    global orchestrator, yolomedia_running, last_frames
-
-    # 【关键】把帧推送到 bridge_io，供 yolomedia 使用
-    try:
-        import bridge_io
-        _, jpeg = cv2.imencode('.jpg', frame)
-        jpeg_bytes = jpeg.tobytes()
-        bridge_io.push_raw_jpeg(jpeg_bytes)
-
-        # 【新增】更新 last_frames，供 Qwen 对话使用
-        try:
-            last_frames.append((time.time(), jpeg_bytes))
-        except Exception as e:
-            pass  # 静默失败，不影响主流程
-    except Exception as e:
-        pass  # 静默失败，不影响主流程
-
-    # 如果没有 orchestrator，直接返回原始帧
-    if orchestrator is None:
-        return frame
-
-    # 如果 yolomedia 正在运行，不处理
-    if yolomedia_running:
-        return frame
-
-    try:
-        current_state = orchestrator.get_state()
-        processor = get_optimized_processor()
-
-        def process_func(f):
-            """内部处理函数"""
-            if current_state == "TRAFFIC_LIGHT_DETECTION":
-                import trafficlight_detection
-                result = trafficlight_detection.process_single_frame(f)
-                out = result['vis_image'] if result['vis_image'] is not None else f
-                return out, ""
-            else:
-                res = orchestrator.process_frame(f)
-                out = res.annotated_image if res.annotated_image is not None else f
-                # 播放语音
-                if res.guidance_text:
-                    play_voice_text(res.guidance_text)
-                return out, res.guidance_text
-
-        # 使用优化处理器处理帧
-        result_frame, _ = processor.process_frame_optimized(
-            frame, current_state, process_func
-        )
-
-        return result_frame if result_frame is not None else frame
-    except Exception as e:
-        return frame  # 静默失败，返回原始帧
+    """遗留接口 - 实际处理已移至 _display_worker_loop + _yolo_worker_loop"""
+    return frame
 
 @app.post("/api/webcam/start")
 async def start_webcamera(request: dict):
@@ -1527,6 +1492,246 @@ async def ws_audio(ws: WebSocket):
         print("[WS] connection closed")
 
 # ---------- WebSocket：浏览器/ESP32 相机入口（JPEG 二进制） ----------
+# ---------- 最新帧缓冲区 + 双线程架构（显示 & YOLO 分离） ----------
+import threading as _cam_threading
+
+_latest_jpeg: Optional[bytes] = None
+_latest_jpeg_lock = _cam_threading.Lock()
+_camera_worker_started = False
+
+# YOLO 处理线程的共享状态
+_yolo_input_frame = None           # YOLO 待处理帧
+_yolo_input_lock = _cam_threading.Lock()
+_yolo_busy = False                 # YOLO 是否正在推理
+_yolo_last_result = None           # YOLO 最新标注结果帧
+_yolo_result_stale_count = 0       # 结果过期计数器
+
+# 摄像头链路性能埋点（每 5 秒打印一次，帮助定位瓶颈）
+_cam_perf_lock = _cam_threading.Lock()
+_cam_perf = {
+    "last_report": time.time(),
+    "recv_frames": 0,
+    "overwrite_frames": 0,
+    "display_delay_sum_ms": 0.0,
+    "display_delay_n": 0,
+    "yolo_submit_frames": 0,
+    "yolo_busy_skip_frames": 0,
+    "yolo_queue_sum_ms": 0.0,
+    "yolo_queue_n": 0,
+    "yolo_proc_sum_ms": 0.0,
+    "yolo_proc_n": 0,
+    "yolo_e2e_sum_ms": 0.0,
+    "yolo_e2e_n": 0,
+}
+
+
+def _cam_perf_add(name: str, value: float = 1.0):
+    with _cam_perf_lock:
+        if name in _cam_perf:
+            _cam_perf[name] += value
+
+
+def _cam_perf_report_if_due(now_ts: Optional[float] = None):
+    now_ts = now_ts or time.time()
+    with _cam_perf_lock:
+        if now_ts - _cam_perf["last_report"] < 5.0:
+            return
+
+        recv_frames = int(_cam_perf["recv_frames"])
+        overwrite_frames = int(_cam_perf["overwrite_frames"])
+        yolo_submit_frames = int(_cam_perf["yolo_submit_frames"])
+        yolo_busy_skip_frames = int(_cam_perf["yolo_busy_skip_frames"])
+
+        display_delay_n = int(_cam_perf["display_delay_n"])
+        display_delay_avg = (
+            _cam_perf["display_delay_sum_ms"] / display_delay_n if display_delay_n else 0.0
+        )
+
+        yolo_queue_n = int(_cam_perf["yolo_queue_n"])
+        yolo_queue_avg = _cam_perf["yolo_queue_sum_ms"] / yolo_queue_n if yolo_queue_n else 0.0
+
+        yolo_proc_n = int(_cam_perf["yolo_proc_n"])
+        yolo_proc_avg = _cam_perf["yolo_proc_sum_ms"] / yolo_proc_n if yolo_proc_n else 0.0
+
+        yolo_e2e_n = int(_cam_perf["yolo_e2e_n"])
+        yolo_e2e_avg = _cam_perf["yolo_e2e_sum_ms"] / yolo_e2e_n if yolo_e2e_n else 0.0
+
+        _cam_perf["last_report"] = now_ts
+        for key in list(_cam_perf.keys()):
+            if key != "last_report":
+                _cam_perf[key] = 0 if key.endswith("_n") or key.endswith("_frames") else 0.0
+
+    print(
+        "[PERF] "
+        f"recv={recv_frames}/5s "
+        f"overwrite={overwrite_frames} "
+        f"display_delay={display_delay_avg:.1f}ms "
+        f"yolo_submit={yolo_submit_frames} "
+        f"yolo_busy_skip={yolo_busy_skip_frames} "
+        f"yolo_queue={yolo_queue_avg:.1f}ms "
+        f"yolo_proc={yolo_proc_avg:.1f}ms "
+        f"yolo_e2e={yolo_e2e_avg:.1f}ms",
+        flush=True,
+    )
+
+
+def _display_worker_loop():
+    """显示线程：快速转发帧给 viewer，不被 YOLO 阻塞"""
+    global _latest_jpeg, _yolo_input_frame
+    import time as _t
+
+    _yolo_result_jpeg = None  # 缓存 YOLO 标注帧的 JPEG（避免每帧重编码）
+    _prev_yolo_id = None      # 跟踪 YOLO 结果是否更新
+
+    while True:
+        jpeg_bytes = None
+        recv_ts = None
+        with _latest_jpeg_lock:
+            if _latest_jpeg is not None:
+                if isinstance(_latest_jpeg, tuple):
+                    jpeg_bytes, recv_ts = _latest_jpeg
+                else:
+                    jpeg_bytes = _latest_jpeg
+                    recv_ts = _t.time()
+                _latest_jpeg = None
+
+        if jpeg_bytes is None:
+            _t.sleep(0.005)
+            continue
+
+        try:
+            display_start_ts = _t.time()
+            if recv_ts is not None:
+                _cam_perf_add("display_delay_sum_ms", (display_start_ts - recv_ts) * 1000.0)
+                _cam_perf_add("display_delay_n", 1)
+
+            # 1. 推原始 JPEG 给 bridge_io（供 yolomedia 等模块使用）
+            try:
+                bridge_io.push_raw_jpeg(jpeg_bytes)
+            except Exception:
+                pass
+
+            # 2. 更新 last_frames（供 Qwen 对话用），直接用原始 JPEG
+            try:
+                last_frames.append((_t.time(), jpeg_bytes))
+            except Exception:
+                pass
+
+            # 3. 发送给 viewer
+            yolo_result = _yolo_last_result  # 原子读取
+            if yolo_result is not None:
+                # 有 YOLO 标注帧 → 检查是否需要重新编码
+                yolo_id = id(yolo_result)
+                if yolo_id != _prev_yolo_id:
+                    # YOLO 结果更新了，编码一次
+                    ok, enc = cv2.imencode(".jpg", yolo_result, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    if ok:
+                        _yolo_result_jpeg = enc.tobytes()
+                    _prev_yolo_id = yolo_id
+                # 发送缓存的 YOLO JPEG
+                if _yolo_result_jpeg:
+                    bridge_io.send_vis_jpeg(_yolo_result_jpeg)
+            else:
+                # 无 YOLO 标注 → 直接转发原始 JPEG（零解码零编码）
+                bridge_io.send_vis_jpeg(jpeg_bytes)
+
+            # 4. 如果 YOLO 不忙，提交解码后的帧（YOLO 需要 numpy）
+            if not _yolo_busy:
+                with _yolo_input_lock:
+                    _yolo_input_frame = (jpeg_bytes, recv_ts, display_start_ts)  # 传 JPEG，让 YOLO 线程自己解码
+                _cam_perf_add("yolo_submit_frames", 1)
+            else:
+                _cam_perf_add("yolo_busy_skip_frames", 1)
+
+            _cam_perf_report_if_due(_t.time())
+
+        except Exception:
+            pass
+
+
+def _yolo_worker_loop():
+    """YOLO 处理线程：独立运行推理，不阻塞显示"""
+    global _yolo_input_frame, _yolo_busy, _yolo_last_result
+    import time as _t
+
+    while True:
+        # 取帧（JPEG bytes）
+        jpeg_data = None
+        recv_ts = None
+        enqueue_ts = None
+        with _yolo_input_lock:
+            if _yolo_input_frame is not None:
+                payload = _yolo_input_frame
+                _yolo_input_frame = None
+                if isinstance(payload, tuple):
+                    jpeg_data = payload[0]
+                    recv_ts = payload[1]
+                    enqueue_ts = payload[2]
+                else:
+                    jpeg_data = payload
+                    recv_ts = _t.time()
+                    enqueue_ts = recv_ts
+
+        if jpeg_data is None:
+            _t.sleep(0.02)
+            continue
+
+        # 检查是否需要导航处理
+        if orchestrator is None or yolomedia_running:
+            _yolo_last_result = None
+            continue
+
+        current_state = orchestrator.get_state()
+        if current_state in ("IDLE", "CHAT"):
+            _yolo_last_result = None
+            continue
+
+        # 解码 JPEG（只在 YOLO 线程做，不占显示线程）
+        arr = np.frombuffer(jpeg_data, dtype=np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            continue
+        frame = cv2.flip(frame, 1)
+
+        yolo_start_ts = _t.time()
+        if enqueue_ts is not None:
+            _cam_perf_add("yolo_queue_sum_ms", (yolo_start_ts - enqueue_ts) * 1000.0)
+            _cam_perf_add("yolo_queue_n", 1)
+
+        _yolo_busy = True
+        try:
+            processor = get_optimized_processor()
+
+            def process_func(f):
+                if current_state == "TRAFFIC_LIGHT_DETECTION":
+                    import trafficlight_detection
+                    result = trafficlight_detection.process_single_frame(f)
+                    out = result['vis_image'] if result['vis_image'] is not None else f
+                    return out, ""
+                else:
+                    res = orchestrator.process_frame(f)
+                    out = res.annotated_image if res.annotated_image is not None else f
+                    if res.guidance_text:
+                        play_voice_text(res.guidance_text)
+                    return out, res.guidance_text
+
+            result_frame, _ = processor.process_frame_optimized(
+                frame, current_state, process_func
+            )
+            _yolo_last_result = result_frame if result_frame is not None else frame
+        except Exception as e:
+            _yolo_last_result = frame
+        finally:
+            yolo_end_ts = _t.time()
+            _cam_perf_add("yolo_proc_sum_ms", (yolo_end_ts - yolo_start_ts) * 1000.0)
+            _cam_perf_add("yolo_proc_n", 1)
+            if recv_ts is not None:
+                _cam_perf_add("yolo_e2e_sum_ms", (yolo_end_ts - recv_ts) * 1000.0)
+                _cam_perf_add("yolo_e2e_n", 1)
+            _cam_perf_report_if_due(yolo_end_ts)
+            _yolo_busy = False
+
+
 @app.websocket("/ws/camera")
 async def ws_camera(ws: WebSocket):
     """接收浏览器摄像头推送的 JPEG 帧"""
@@ -1542,15 +1747,29 @@ async def ws_camera(ws: WebSocket):
     if orchestrator is None and blind_path_navigator is not None and cross_street_navigator is not None:
         orchestrator = NavigationMaster(blind_path_navigator, cross_street_navigator)
 
-    loop = asyncio.get_event_loop()
+    # 启动后台线程（仅一次）
+    global _camera_worker_started
+    if not _camera_worker_started:
+        _camera_worker_started = True
+        _cam_threading.Thread(target=_display_worker_loop, daemon=True, name="display").start()
+        _cam_threading.Thread(target=_yolo_worker_loop, daemon=True, name="yolo").start()
+        print("[CAMERA] 显示线程 + YOLO线程已启动", flush=True)
+
     try:
         while True:
             msg = await ws.receive()
             if msg.get("type") == "websocket.disconnect":
                 break
             if "bytes" in msg and msg["bytes"]:
-                jpeg_bytes = msg["bytes"]
-                await loop.run_in_executor(None, _process_camera_frame, jpeg_bytes)
+                now_ts = time.time()
+                # 只保存最新帧，旧的自动丢弃
+                with _latest_jpeg_lock:
+                    global _latest_jpeg
+                    if _latest_jpeg is not None:
+                        _cam_perf_add("overwrite_frames", 1)
+                    _latest_jpeg = (msg["bytes"], now_ts)
+                _cam_perf_add("recv_frames", 1)
+                _cam_perf_report_if_due(now_ts)
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -1558,21 +1777,6 @@ async def ws_camera(ws: WebSocket):
             print(f"[CAMERA] Error: {e}", flush=True)
     finally:
         print("[CAMERA] Browser camera disconnected", flush=True)
-
-def _process_camera_frame(jpeg_bytes: bytes):
-    """在线程池中解码并处理摄像头帧"""
-    try:
-        arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
-        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if frame is not None:
-            result = _webcam_frame_processor(frame)
-            # 处理完后广播回前端 viewer
-            if result is not None:
-                bridge_io.send_vis_bgr(result)
-            else:
-                bridge_io.send_vis_bgr(frame)
-    except Exception:
-        pass
 
 # ---------- WebSocket：浏览器订阅相机帧 ----------
 @app.websocket("/ws/viewer")

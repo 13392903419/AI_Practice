@@ -79,6 +79,19 @@ def send_vis_bgr(bgr, quality: int = 80):
         except Exception:
             pass
 
+
+def send_vis_jpeg(jpeg_bytes: bytes):
+    """直接转发已编码的 JPEG bytes 给前端 viewer（零拷贝，无编解码开销）"""
+    if not jpeg_bytes:
+        return
+    with _sender_lock:
+        cb = _sender_cb
+    if cb:
+        try:
+            cb(jpeg_bytes)
+        except Exception:
+            pass
+
 def send_ui_final(text: str):
     """把一条UI文案作为 final answer 推给前端（线程安全回调）"""
     if not text:

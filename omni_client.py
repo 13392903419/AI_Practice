@@ -7,21 +7,23 @@ from openai import OpenAI
 from typing import Optional
 
 # ===== 模式选择：本地 GPU 或云端 API =====
-USE_LOCAL_QWEN = os.getenv("USE_LOCAL_QWEN", "true").lower() == "true"
+USE_LOCAL_QWEN = os.getenv("USE_LOCAL_QWEN", "false").lower() == "true"
 
 # ===== OpenAI 兼容（达摩院 DashScope 兼容模式）=====
-API_KEY = os.getenv("DASHSCOPE_API_KEY", "sk-82107b037f5847ee90deb81f6f976e0f")
-QWEN_MODEL = "qwen-omni-turbo"
+API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
+QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen-vl-plus")
 
 # 云端客户端（延迟初始化）
 oai_client: Optional[OpenAI] = None
 if not USE_LOCAL_QWEN:
-    if not API_KEY or API_KEY == "sk-82107b037f5847ee90deb81f6f976e0f":
-        raise RuntimeError("使用云端模式需设置有效的 DASHSCOPE_API_KEY")
-    oai_client = OpenAI(
-        api_key=API_KEY,
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-    )
+    if not API_KEY:
+        print("[omni_client] 警告: 未设置 DASHSCOPE_API_KEY，云端对话不可用")
+    else:
+        oai_client = OpenAI(
+            api_key=API_KEY,
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        )
+        print(f"[omni_client] 云端 DashScope 模式已初始化 (model={QWEN_MODEL})")
 
 # ===== 本地 GPU 千问客户端 =====
 _local_qwen_client = None
@@ -98,13 +100,18 @@ async def stream_chat(
         if oai_client is None:
             raise RuntimeError("云端客户端未初始化，请设置 DASHSCOPE_API_KEY")
 
+        # 系统提示：要求简洁回答（盲人导航场景）
+        sys_msg = {
+            "role": "system",
+            "content": "你是盲人导航助手。用口语化的简短句子回答，不要使用markdown格式、列表或编号。回答控制在50字以内，只描述最关键的信息。"
+        }
+
         completion = oai_client.chat.completions.create(
             model=QWEN_MODEL,
-            messages=[{"role": "user", "content": content_list}],
-            modalities=["text", "audio"],
-            audio={"voice": voice, "format": audio_format},
+            messages=[sys_msg, {"role": "user", "content": content_list}],
             stream=True,
-            stream_options={"include_usage": True},
+            max_tokens=150,
+            temperature=0.3,
         )
 
         # 注意：OpenAI SDK 的流是同步迭代器；在 async 场景下逐项 yield

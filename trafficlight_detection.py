@@ -247,7 +247,7 @@ def main(headless: bool = True, stop_event=None):
 
             # 【优化】YOLO推理 - 添加计时
             inference_start = time.time()
-            results = model(frame, conf=CONF_THRESHOLD, verbose=False)
+            results = model(frame, conf=CONF_THRESHOLD, verbose=False, imgsz=320, half=True)
             inference_time = (time.time() - inference_start) * 1000
             
             # 监控推理时间
@@ -502,7 +502,7 @@ def process_single_frame(image: np.ndarray, ui_broadcast_callback=None) -> dict:
     t_now = time.time()
     
     # YOLO推理
-    results = _model(image, conf=CONF_THRESHOLD, verbose=False)
+    results = _model(image, conf=CONF_THRESHOLD, verbose=False, imgsz=320, half=True)
     
     # 处理检测结果
     detected_light = None

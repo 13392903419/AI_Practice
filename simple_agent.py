@@ -43,8 +43,10 @@ class AgentResponse:
 HOTWORD_ROUTES = {
     # blindpath（盲道导航）
     "blindpath": {
-        "start": ["开始导航", "盲道导航", "启动导航", "开始盲道"],
-        "stop": ["停止导航", "结束导航"],
+        "start": ["开始导航", "盲道导航", "启动导航", "开始盲道", "开启导航", "开启盲道",
+                  "梦的导航", "忙道导航", "盲到导航", "芒道导航",  # ASR 常见误识别
+                  "开始梦的导航", "开启梦的导航", "开始忙道导航"],
+        "stop": ["停止导航", "结束导航", "关闭导航"],
     },
     # cross_street（过马路）
     "cross_street": {
@@ -76,7 +78,9 @@ def _fast_hotword_route(text: str) -> tuple[Optional[str], Dict[str, Any]]:
     快速热词路由 - 直接返回 intent + params，不调 LLM
     返回: (intent, params) 或 (None, {}) 表示没命中热词
     """
-    text = text.strip()
+    # 清理标点符号（ASR 经常带标点）
+    import re
+    text = re.sub(r'[。！？，、,\.!?\s]+', '', text).strip()
 
     # ========= 盲道导航 =========
     for keyword in HOTWORD_ROUTES["blindpath"]["start"]:
@@ -334,7 +338,7 @@ class SimpleAgent:
                 destination = self._extract_destination(user_input)
                 params = {"destination": destination}
 
-            # 如果没命中热词，走 chat（LLM 文本对话）
+            # 如果没命中热词，标记为 chat（但不一定调 LLM，取决于 chat_mode）
             if intent is None:
                 intent = "chat"
 

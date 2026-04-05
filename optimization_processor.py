@@ -17,10 +17,10 @@ from typing import Optional, Callable, Dict, Any, Tuple
 class FrameSkipper:
     """跳帧处理器 - 只处理部分帧"""
 
-    def __init__(self, skip_frames: int = 5):
+    def __init__(self, skip_frames: int = 2):
         """
         Args:
-            skip_frames: 跳过帧数（5=每5帧处理1帧）
+            skip_frames: 跳过帧数（2=每2帧处理1帧）
         """
         self.skip_frames = skip_frames
         self.frame_count = 0

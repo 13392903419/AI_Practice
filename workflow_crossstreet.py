@@ -1789,7 +1789,7 @@ class YOLOModelWrapper:
     def detect(self, image, confidence_threshold=0.25):
         """使用 predict 方法并转换为 detect 格式"""
         try:
-            results = self.model.predict(image, conf=confidence_threshold, verbose=False)
+            results = self.model.predict(image, conf=confidence_threshold, verbose=False, imgsz=320, half=True)
             detections = []
             if results and len(results) > 0:
                 result = results[0]
