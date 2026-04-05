@@ -1,79 +1,63 @@
+# ========================================
 # AI Glass System - Python Dependencies
-# Python 3.9 - 3.11 supported
+# 智能盲人导航眼镜系统
+# Python: 3.10 - 3.11
+# CUDA: 11.8
+# ========================================
 
-# Core Web Framework
+# ==================== Web 框架 ====================
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 websockets==12.0
 python-multipart==0.0.6
 starlette==0.27.0
 
-# Computer Vision & Deep Learning
+# ==================== 计算机视觉与深度学习 ====================
 opencv-python==4.8.1.78
+opencv-contrib-python==4.8.1.78
 numpy==1.24.3
-Pillow==10.1.0
+Pillow==10.1.0                    # ✅ 新增：图像处理（被多个模块使用）
 ultralytics==8.3.200
+lap>=0.5.12
 
-# YOLO-E text model dependency (provides `import clip` without GitHub access)
+# ==================== YOLO-E 依赖 ====================
 clip-anytorch==2.6.0
+setuptools==68.2.2               # clip-anytorch 需要 pkg_resources
 
-# `clip-anytorch` imports `pkg_resources` which is provided by setuptools.
-# Pin to a known-good version that still ships `pkg_resources`.
-setuptools==68.2.2
+# ==================== PyTorch ====================
+# GPU (CUDA 11.8): conda install pytorch==2.0.1 torchvision==0.15.2 pytorch-cuda=11.8 -c pytorch -c nvidia
 
-# PyTorch (建议由安装脚本按 CPU/GPU 安装，避免 CUDA 版本冲突)
-# - GPU (CUDA 11.8 / cu118): torch==2.0.1+cu118 torchvision==0.15.2+cu118
-# - CPU: torch==2.0.1 torchvision==0.15.2
-
-# MediaPipe (Hand Detection)
+# ==================== MediaPipe ====================
 mediapipe==0.10.8
 
-# Audio Processing
-# PyAudio 在 Windows 上经常需要手动安装 wheel（见下方说明），因此不放在默认 requirements 里
-# pyaudio==0.2.14
+# ==================== Qwen 本地模型（新增）====================
+transformers>=4.37.0             # Qwen2VL 模型加载
+accelerate>=0.26.0               # transformers device_map 支持
+qwen-vl-utils>=0.0.1             # Qwen 视觉工具
+
+# ==================== 音频处理 ====================
 pydub==0.25.1
 pygame==2.5.2
 sounddevice==0.4.6
 websocket-client==1.6.4
 requests>=2.31.0
-edge-tts>=7.2.0  # 微软免费 TTS
+edge-tts>=7.2.0                  # 微软免费 TTS
 
-# Aliyun DashScope SDK (ASR & Qwen-Omni)
-dashscope==1.14.1
-openai==1.3.5  # For DashScope compatibility mode
+# ==================== 阿里云服务 ====================
+dashscope==1.14.1                # ASR & Qwen-Omni
+openai==1.3.5                    # DashScope 兼容模式
+httpx>=0.23.0,<0.28              # openai 1.3.5 兼容要求
 
-# openai==1.3.5 与 httpx 0.28+ 存在不兼容（0.28 移除了 proxies 参数）
-httpx>=0.23.0,<0.28
-
-# Environment & Configuration
+# ==================== 配置管理 ====================
 python-dotenv==1.0.0
 
-# Utilities
-opencv-contrib-python==4.8.1.78  # Extended OpenCV modules
+# ==================== 可选性能优化 ====================
+# 取消注释以启用：
+# onnxruntime-gpu==1.16.3        # ONNX 模型加速
+# tensorrt==8.6.1                # TensorRT 优化
 
-# Optional Performance Optimizations
-# Uncomment if needed:
-# onnxruntime-gpu==1.16.3  # For ONNX model acceleration
-# tensorrt==8.6.1  # For TensorRT optimization
-
-# Development & Testing (Optional)
+# ==================== 开发工具（可选）====================
 # pytest==7.4.3
 # pytest-asyncio==0.21.1
 # black==23.11.0
 # flake8==6.1.0
-
-# Platform-specific dependencies
-# Windows:
-# - PyAudio requires separate installation: https://www.lfd.uci.edu/~gohlke/pythonlibs/#pyaudio
-# Linux:
-# - Install PyAudio dependencies: sudo apt-get install portaudio19-dev python3-pyaudio
-# - Install OpenCV dependencies: sudo apt-get install libgl1-mesa-glx
-# macOS:
-# - Install PyAudio: brew install portaudio && pip install pyaudio
-
-# CUDA Dependencies (GPU acceleration)
-# - CUDA Toolkit 11.8+: https://developer.nvidia.com/cuda-downloads
-# - cuDNN 8.6+: https://developer.nvidia.com/cudnn
-# PyTorch with CUDA support:
-# pip install torch==2.0.1+cu118 torchvision==0.15.2+cu118 --index-url https://download.pytorch.org/whl/cu118
-

@@ -261,12 +261,81 @@
     wsCam.onmessage = (ev)=> drawBlob(ev.data);
   }
 
+  // ===== 麦克风推流：浏览器 → /ws_audio（PCM16, 16kHz, 单声道, 20ms帧）=====
+  let micWs = null;
+  let micAudioCtx = null;
+  let micStream = null;
+  let micProcessor = null;
+
+  async function startMic() {
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }, video: false });
+      // 使用浏览器默认采样率，后面重采样到 16kHz
+      micAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const nativeSR = micAudioCtx.sampleRate;
+      const targetSR = 16000;
+      const ratio = nativeSR / targetSR;
+      console.log(`[Mic] 原始采样率: ${nativeSR}, 目标: ${targetSR}, 比率: ${ratio.toFixed(2)}`);
+
+      const source = micAudioCtx.createMediaStreamSource(micStream);
+      // bufferSize 要大一些确保够重采样
+      const bufSize = 4096;
+      micProcessor = micAudioCtx.createScriptProcessor(bufSize, 1, 1);
+
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      micWs = new WebSocket(`${proto}//${location.host}/ws_audio`);
+      micWs.binaryType = 'arraybuffer';
+
+      micWs.onopen = () => {
+        micWs.send('START');
+        console.log('[Mic] WebSocket 已连接，发送 START');
+        setBadge($asrStatus, true, 'ASR: connected');
+      };
+      micWs.onmessage = ev => {
+        const msg = typeof ev.data === 'string' ? ev.data.trim() : '';
+        if (msg === 'RESTART') { micWs.send('START'); }
+        else if (msg.startsWith('OK:')) { console.log('[Mic]', msg); }
+      };
+      micWs.onclose = () => { setBadge($asrStatus, false, 'ASR: disconnected'); console.log('[Mic] WebSocket 已关闭'); };
+      micWs.onerror = e => { setBadge($asrStatus, false, 'ASR: error'); console.error('[Mic] 错误:', e); };
+
+      micProcessor.onaudioprocess = e => {
+        if (!micWs || micWs.readyState !== WebSocket.OPEN) return;
+        const float32 = e.inputBuffer.getChannelData(0);
+        // 重采样：从 nativeSR 到 16kHz
+        const outLen = Math.floor(float32.length / ratio);
+        const pcm16 = new Int16Array(outLen);
+        for (let i = 0; i < outLen; i++) {
+          const srcIdx = Math.floor(i * ratio);
+          pcm16[i] = Math.max(-32768, Math.min(32767, float32[srcIdx] * 32768));
+        }
+        micWs.send(pcm16.buffer);
+      };
+
+      source.connect(micProcessor);
+      micProcessor.connect(micAudioCtx.destination);
+      console.log('[Mic] 麦克风推流已启动');
+    } catch(e) {
+      console.error('[Mic] 启动失败:', e);
+      setBadge($asrStatus, false, 'ASR: mic error');
+    }
+  }
+
+  function stopMic() {
+    if (micProcessor) { micProcessor.disconnect(); micProcessor = null; }
+    if (micAudioCtx) { micAudioCtx.close(); micAudioCtx = null; }
+    if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    if (micWs) { micWs.close(); micWs = null; }
+    console.log('[Mic] 麦克风推流已停止');
+  }
+
   function connectASR(){
+    // connectASR 现在只负责 /ws_ui 文字接收，麦克风推流由 startMic() 单独处理
     try{ if (wsUI) wsUI.close(); }catch(e){}
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     wsUI = new WebSocket(`${proto}://${location.host}/ws_ui`);
     setBadge($asrStatus, false, 'ASR: connecting…');
-    wsUI.onopen  = ()=> setBadge($asrStatus, true, 'ASR: connected');
+    wsUI.onopen  = ()=> { setBadge($asrStatus, true, 'ASR: connected'); startMic(); };
     wsUI.onclose = ()=> setBadge($asrStatus, false, 'ASR: disconnected');
     wsUI.onerror = ()=> setBadge($asrStatus, false, 'ASR: error');
     wsUI.onmessage = (ev)=>{
@@ -320,87 +389,88 @@
     lastTimestamp = 0; // 重置时间戳计数
   };
 
-  // 电脑摄像头控制
+  // ===== 电脑摄像头：浏览器推帧到服务器 /ws/camera =====
   let webcamActive = false;
-  $btnWebcam.onclick = async () => {
-    if (webcamActive) {
-      // 停止摄像头
-      try {
-        const res = await fetch('/api/webcam/stop', { method: 'POST' });
-        const data = await res.json();
-        if (data.success) {
-          webcamActive = false;
-          $btnWebcam.textContent = '电脑摄像头';
-          $btnWebcam.classList.remove('primary');
-          $btnWebcam.classList.add('ghost');
-          $camStatus.textContent = 'Camera: 已停止';
-          $camStatus.classList.remove('ok');
-          console.log('[Webcam] 已停止');
-        }
-      } catch (e) {
-        console.error('[Webcam] 停止失败:', e);
-      }
-    } else {
-      // 启动摄像头
-      try {
-        const res = await fetch('/api/webcam/start', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ camera_id: 0, width: 640, height: 480 })
-        });
-        const data = await res.json();
-        if (data.success) {
-          webcamActive = true;
-          $btnWebcam.textContent = '停止摄像头';
-          $btnWebcam.classList.remove('ghost');
-          $btnWebcam.classList.add('primary');
-          $camStatus.textContent = 'Camera: 电脑摄像头';
-          $camStatus.classList.add('ok');
-          document.getElementById('canvasHint').style.display = 'none';
-          console.log('[Webcam] 已启动:', data.camera_info);
-        } else {
-          console.error('[Webcam] 启动失败:', data.error);
-          alert('启动摄像头失败: ' + (data.error || '未知错误'));
-        }
-      } catch (e) {
-        console.error('[Webcam] 启动失败:', e);
-        alert('启动摄像头失败: ' + e.message);
-      }
-    }
-  };
+  let cameraStream = null;
+  let cameraWs = null;
+  let cameraFrameTimer = null;
+  const cameraCanvas = document.createElement('canvas');
+  const cameraCtx = cameraCanvas.getContext('2d');
+  const cameraVideo = document.createElement('video');
+  cameraVideo.autoplay = true;
+  cameraVideo.playsInline = true;
+  cameraVideo.muted = true;
 
-  // 默认启动电脑摄像头（不等待 ESP32）
-  async function initDefaultCamera() {
+  async function startBrowserCamera() {
     try {
-      // 先连接 viewer WebSocket（这样才能接收摄像头帧）
-      connectCamera();
+      cameraStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+      cameraVideo.srcObject = cameraStream;
+      await cameraVideo.play();
 
-      // 等待一小段时间确保 WebSocket 连接建立
-      await new Promise(resolve => setTimeout(resolve, 200));
+      // 通知服务端初始化导航器
+      await fetch('/api/webcam/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
 
-      const res = await fetch('/api/webcam/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ camera_id: 0, width: 640, height: 480 })
-      });
-      const data = await res.json();
-      if (data.success) {
-        webcamActive = true;
-        $btnWebcam.textContent = '停止摄像头';
-        $btnWebcam.classList.remove('ghost');
-        $btnWebcam.classList.add('primary');
-        $camStatus.textContent = 'Camera: 电脑摄像头';
-        $camStatus.classList.add('ok');
-        document.getElementById('canvasHint').style.display = 'none';
-        console.log('[Webcam] 默认摄像头已启动:', data.camera_info);
-      } else {
-        console.warn('[Webcam] 启动失败，等待手动启动:', data.error);
-        $camStatus.textContent = 'Camera: 点击"电脑摄像头"启动';
-      }
+      // 建立 WebSocket 推帧连接
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      cameraWs = new WebSocket(`${proto}//${location.host}/ws/camera`);
+      cameraWs.binaryType = 'arraybuffer';
+
+      cameraWs.onopen = () => {
+        console.log('[Camera] WebSocket 推帧已连接');
+        // 每 66ms 推一帧（约 15fps）
+        cameraFrameTimer = setInterval(() => {
+          if (cameraWs.readyState !== WebSocket.OPEN) return;
+          const vw = cameraVideo.videoWidth, vh = cameraVideo.videoHeight;
+          if (!vw || !vh) return;
+          cameraCanvas.width = vw;
+          cameraCanvas.height = vh;
+          cameraCtx.drawImage(cameraVideo, 0, 0, vw, vh);
+          cameraCanvas.toBlob(blob => {
+            if (blob && cameraWs.readyState === WebSocket.OPEN) {
+              blob.arrayBuffer().then(buf => cameraWs.send(buf));
+            }
+          }, 'image/jpeg', 0.75);
+        }, 66);
+      };
+
+      cameraWs.onerror = e => console.error('[Camera] WebSocket 错误:', e);
+      cameraWs.onclose = () => { console.log('[Camera] WebSocket 已关闭'); clearInterval(cameraFrameTimer); };
+
+      webcamActive = true;
+      $btnWebcam.textContent = '停止摄像头';
+      $btnWebcam.classList.remove('ghost');
+      $btnWebcam.classList.add('primary');
+      $camStatus.textContent = 'Camera: 电脑摄像头';
+      $camStatus.classList.add('ok');
+      document.getElementById('canvasHint').style.display = 'none';
+      console.log('[Camera] 浏览器摄像头已启动');
     } catch (e) {
-      console.warn('[Webcam] 自动启动失败:', e);
-      $camStatus.textContent = 'Camera: 点击"电脑摄像头"启动';
+      console.error('[Camera] 启动失败:', e);
+      alert('启动摄像头失败: ' + e.message);
     }
+  }
+
+  function stopBrowserCamera() {
+    clearInterval(cameraFrameTimer);
+    if (cameraWs) { cameraWs.close(); cameraWs = null; }
+    if (cameraStream) { cameraStream.getTracks().forEach(t => t.stop()); cameraStream = null; }
+    fetch('/api/webcam/stop', { method: 'POST' });
+    webcamActive = false;
+    $btnWebcam.textContent = '电脑摄像头';
+    $btnWebcam.classList.remove('primary');
+    $btnWebcam.classList.add('ghost');
+    $camStatus.textContent = 'Camera: 已停止';
+    $camStatus.classList.remove('ok');
+    console.log('[Camera] 浏览器摄像头已停止');
+  }
+
+  $btnWebcam.onclick = () => webcamActive ? stopBrowserCamera() : startBrowserCamera();
+
+  // 默认自动启动摄像头
+  async function initDefaultCamera() {
+    connectCamera();
+    await new Promise(resolve => setTimeout(resolve, 200));
+    await startBrowserCamera();
   }
 
   // 页面加载时：启动电脑摄像头 + 连接 ASR

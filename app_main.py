@@ -140,7 +140,7 @@ def load_navigation_models():
     global yolo_seg_model, obstacle_detector
 
     try:
-        seg_model_path = os.getenv("BLIND_PATH_MODEL", r"D:\\AIProject\\Blind_for_Navigation\\model\\yolo-seg.pt")
+        seg_model_path = os.getenv("BLIND_PATH_MODEL", "model/yolo-seg.pt")
         #print(f"[NAVIGATION] 尝试加载模型: {seg_model_path}")
 
         if os.path.exists(seg_model_path):
@@ -1122,34 +1122,11 @@ def _webcam_frame_processor(frame):
 @app.post("/api/webcam/start")
 async def start_webcamera(request: dict):
     """
-    启动电脑摄像头
-    请求格式:
-    {
-        "camera_id": 0,  // 可选，默认 0
-        "width": 640,    // 可选，默认 640
-        "height": 480    // 可选，默认 480
-    }
+    初始化导航器（浏览器摄像头帧通过 /ws/camera 推送，无需服务端开本地摄像头）
     """
-    global webcam_active, webcam_handler
-
-    camera_id = request.get("camera_id", 0)
-    width = request.get("width", 640)
-    height = request.get("height", 480)
+    global webcam_active
 
     try:
-        # 获取或创建 webcam handler
-        if webcam_handler is None:
-            webcam_handler = get_webcam_handler()
-            webcam_handler.on_frame_callback = _webcam_frame_processor
-            webcam_handler.viewer_websockets = camera_viewers
-
-        # 确保 viewer_websockets 指向最新的 camera_viewers
-        webcam_handler.viewer_websockets = camera_viewers
-
-        # 启动摄像头
-        await webcam_handler.start(camera_id=camera_id, width=width, height=height)
-        webcam_active = True
-
         # 初始化导航器（如果还没初始化）
         global blind_path_navigator, cross_street_navigator, orchestrator
 
@@ -1165,12 +1142,11 @@ async def start_webcamera(request: dict):
         if orchestrator is None and blind_path_navigator is not None and cross_street_navigator is not None:
             orchestrator = NavigationMaster(blind_path_navigator, cross_street_navigator)
 
-        camera_info = webcam_handler.get_camera_info()
-
+        webcam_active = True
         return {
             "success": True,
-            "message": "电脑摄像头已启动",
-            "camera_info": camera_info
+            "message": "导航系统就绪，请通过浏览器摄像头推帧",
+            "camera_info": {"type": "browser", "websocket": "/ws/camera"}
         }
 
     except Exception as e:
@@ -1178,21 +1154,10 @@ async def start_webcamera(request: dict):
 
 @app.post("/api/webcam/stop")
 async def stop_webcamera():
-    """停止电脑摄像头"""
-    global webcam_active, webcam_handler
-
-    try:
-        if webcam_handler:
-            await webcam_handler.stop()
-            webcam_active = False
-
-        return {
-            "success": True,
-            "message": "电脑摄像头已停止"
-        }
-
-    except Exception as e:
-        return {"error": str(e)}
+    """停止电脑摄像头（浏览器端断开 /ws/camera 即可）"""
+    global webcam_active
+    webcam_active = False
+    return {"success": True, "message": "摄像头已停止"}
 
 @app.get("/api/webcam/status")
 async def webcam_status():
@@ -1547,8 +1512,50 @@ async def ws_audio(ws: WebSocket):
             esp32_audio_ws = None
         print("[WS] connection closed")
 
-# ---------- WebSocket：ESP32 相机入口（JPEG 二进制） ----------
+# ---------- WebSocket：浏览器/ESP32 相机入口（JPEG 二进制） ----------
 @app.websocket("/ws/camera")
+async def ws_camera(ws: WebSocket):
+    """接收浏览器摄像头推送的 JPEG 帧"""
+    await ws.accept()
+    print("[CAMERA] Browser camera connected", flush=True)
+
+    # 初始化导航器（如果还没初始化）
+    global blind_path_navigator, cross_street_navigator, orchestrator
+    if blind_path_navigator is None and yolo_seg_model is not None:
+        blind_path_navigator = BlindPathNavigator(yolo_seg_model, obstacle_detector)
+    if cross_street_navigator is None and yolo_seg_model is not None:
+        cross_street_navigator = CrossStreetNavigator(seg_model=yolo_seg_model, obs_model=None)
+    if orchestrator is None and blind_path_navigator is not None and cross_street_navigator is not None:
+        orchestrator = NavigationMaster(blind_path_navigator, cross_street_navigator)
+
+    loop = asyncio.get_event_loop()
+    try:
+        while True:
+            msg = await ws.receive()
+            if "bytes" in msg and msg["bytes"]:
+                jpeg_bytes = msg["bytes"]
+                await loop.run_in_executor(None, _process_camera_frame, jpeg_bytes)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"[CAMERA] Error: {e}", flush=True)
+    finally:
+        print("[CAMERA] Browser camera disconnected", flush=True)
+
+def _process_camera_frame(jpeg_bytes: bytes):
+    """在线程池中解码并处理摄像头帧"""
+    try:
+        arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if frame is not None:
+            result = _webcam_frame_processor(frame)
+            # 处理完后广播回前端 viewer
+            if result is not None:
+                bridge_io.send_vis_bgr(result)
+            else:
+                bridge_io.send_vis_bgr(frame)
+    except Exception:
+        pass
 
 # ---------- WebSocket：浏览器订阅相机帧 ----------
 @app.websocket("/ws/viewer")
@@ -1867,9 +1874,23 @@ async def on_shutdown():
     print("[SHUTDOWN] 资源清理完成")
 
 if __name__ == "__main__":
-    print("[STARTUP] 启动 HTTP:8081")
-    uvicorn.run(
-        app, host="0.0.0.0", port=8081,
-        log_level="warning", access_log=False,
-        loop="asyncio", workers=1, reload=False,
-    )
+    import os as _os
+    _ssl_cert = _os.getenv("SSL_CERT", "ssl/cert.pem")
+    _ssl_key  = _os.getenv("SSL_KEY",  "ssl/key.pem")
+    _use_ssl  = _os.path.exists(_ssl_cert) and _os.path.exists(_ssl_key)
+
+    if _use_ssl:
+        print(f"[STARTUP] 启动 HTTPS:8081 (SSL: {_ssl_cert})")
+        uvicorn.run(
+            app, host="0.0.0.0", port=8081,
+            log_level="warning", access_log=False,
+            loop="asyncio", workers=1, reload=False,
+            ssl_certfile=_ssl_cert, ssl_keyfile=_ssl_key,
+        )
+    else:
+        print("[STARTUP] 启动 HTTP:8081 (未找到 SSL 证书，使用 HTTP)")
+        uvicorn.run(
+            app, host="0.0.0.0", port=8081,
+            log_level="warning", access_log=False,
+            loop="asyncio", workers=1, reload=False,
+        )

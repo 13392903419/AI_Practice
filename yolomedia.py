@@ -92,8 +92,8 @@ except Exception as e:
     print(f"[DETECTOR] YOLOE backend not ready: {e}", flush=True)
 
 # ========= 路径参数（按需修改）=========
-YOLO_MODEL_PATH = r'D:\\AIProject\\Blind_for_Navigation\\model\\shoppingbest5.pt'
-HAND_TASK_PATH  = r"D:\\AIProject\\Blind_for_Navigation\\model\\hand_landmarker.task"
+YOLO_MODEL_PATH = os.getenv("SHOPPING_MODEL", "model/shoppingbest5.pt")
+HAND_TASK_PATH  = os.getenv("HAND_TASK_PATH", "model/hand_landmarker.task")
 
 # ========= 摄像头 =========
 CAM_INDEX = 0

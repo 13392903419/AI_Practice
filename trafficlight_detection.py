@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # ========= 配置参数 =========
-YOLO_MODEL_PATH = r"D:\\AIProject\\Blind_for_Navigation\\model\\trafficlight.pt"
+YOLO_MODEL_PATH = os.getenv("TRAFFIC_LIGHT_MODEL", "model/trafficlight.pt")
 
 # ========= 显示参数 =========
 CONF_THRESHOLD = 0.25  # 置信度阈值
