@@ -265,19 +265,12 @@ def _init_font():
     except Exception:
         _PIL_OK = False
         return
-    candidates = [
-        r"C:\\Windows\\Fonts\\msyh.ttc",
-        r"C:\\Windows\\Fonts\\msyh.ttf",
-        r"C:\\Windows\\Fonts\\simhei.ttf",
-        r"C:\\Windows\\Fonts\\simfang.ttf",
-        r"C:\\Windows\\Fonts\\simsun.ttc",
-        r"C:\\Windows\\Fonts\\simsunb.ttf",
-    ]
-    for p in candidates:
-        if os.path.exists(p):
-            _FONT_PATH = p
-            return
-    _PIL_OK = False
+    from utils import get_cjk_font_path
+    _fp = get_cjk_font_path()
+    if _fp:
+        _FONT_PATH = _fp
+    else:
+        _PIL_OK = False
 _init_font()
 
 def draw_text_cn(img_bgr, text, xy, font_size=20, color=(255,255,255), stroke=None, ui_hint=True):

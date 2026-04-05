@@ -2568,15 +2568,15 @@ class BlindPathNavigator:
             if PIL_AVAILABLE:
                 try:
                     from PIL import Image as PILImage, ImageDraw, ImageFont
+                    from utils import get_cjk_font_path
                     # 尝试加载中文字体
                     font = None
-                    for font_path in ["C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simhei.ttf"]:
-                        if os.path.exists(font_path):
-                            try:
-                                font = ImageFont.truetype(font_path, font_px)
-                                break
-                            except:
-                                continue
+                    _fp = get_cjk_font_path()
+                    if _fp:
+                        try:
+                            font = ImageFont.truetype(_fp, font_px)
+                        except:
+                            pass
                     if font:
                         bbox = ImageDraw.Draw(PILImage.new('RGB', (1, 1))).textbbox((0, 0), full_text, font=font)
                         tw = max(1, bbox[2] - bbox[0])
@@ -2670,21 +2670,13 @@ class BlindPathNavigator:
             
             # 尝试多种字体，确保中文显示
             font = None
-            font_paths = [
-                "C:/Windows/Fonts/msyh.ttc",      # 微软雅黑
-                "C:/Windows/Fonts/simhei.ttf",    # 黑体
-                "C:/Windows/Fonts/simsun.ttc",    # 宋体
-                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",  # Linux
-                "/System/Library/Fonts/PingFang.ttc",  # macOS
-            ]
-            
-            for font_path in font_paths:
+            from utils import get_cjk_font_path
+            _fp = get_cjk_font_path()
+            if _fp:
                 try:
-                    if os.path.exists(font_path):
-                        font = ImageFont.truetype(font_path, base_font_size)
-                        break
+                    font = ImageFont.truetype(_fp, base_font_size)
                 except:
-                    continue
+                    pass
             
             if font is None:
                 font = ImageFont.load_default()
@@ -3019,24 +3011,15 @@ class BlindPathNavigator:
             base_size = 24  # 基准字体大小
             font_size = int(base_size * font_scale / 0.6)
             
-            # 尝试加载微软雅黑字体
+            # 加载中文字体
+            from utils import get_cjk_font_path
             font = None
-            font_paths = [
-                "C:/Windows/Fonts/msyh.ttc",      # 微软雅黑
-                "C:/Windows/Fonts/msyh.ttf",      # 微软雅黑旧版
-                "C:/Windows/Fonts/simhei.ttf",    # 黑体
-                "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",  # Linux
-                "/System/Library/Fonts/PingFang.ttc",  # macOS
-            ]
-            
-            for font_path in font_paths:
-                if os.path.exists(font_path):
-                    try:
-                        font = ImageFont.truetype(font_path, font_size)
-                        break
-                    except:
-                        continue
-            
+            _fp = get_cjk_font_path()
+            if _fp:
+                try:
+                    font = ImageFont.truetype(_fp, font_size)
+                except:
+                    pass
             if font is None:
                 font = ImageFont.load_default()
             
@@ -3075,22 +3058,15 @@ class BlindPathNavigator:
             base_font_size = max(8, int(round(16 * env_scale)))
             padding = max(4, int(round(8 * env_scale)))
             
-            # 尝试加载微软雅黑字体
+            # 加载中文字体
+            from utils import get_cjk_font_path
             font = None
-            font_paths = [
-                "C:/Windows/Fonts/msyh.ttc",      # 微软雅黑
-                "C:/Windows/Fonts/msyh.ttf",      # 微软雅黑旧版
-                "C:/Windows/Fonts/simhei.ttf",    # 黑体
-            ]
-            
-            for font_path in font_paths:
-                if os.path.exists(font_path):
-                    try:
-                        font = ImageFont.truetype(font_path, base_font_size)
-                        break
-                    except:
-                        continue
-            
+            _fp = get_cjk_font_path()
+            if _fp:
+                try:
+                    font = ImageFont.truetype(_fp, base_font_size)
+                except:
+                    pass
             if font is None:
                 font = ImageFont.load_default()
             

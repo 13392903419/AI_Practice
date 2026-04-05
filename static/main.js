@@ -1,5 +1,17 @@
 // static/main.js
 
+// ===== 用户交互时预解锁音频自动播放 =====
+document.addEventListener('click', function _unlockAudio() {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const buf = ctx.createBuffer(1, 1, 22050);
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(ctx.destination);
+  src.start(0);
+  ctx.resume().then(() => console.log('[Audio] 自动播放已解锁'));
+  document.removeEventListener('click', _unlockAudio);
+}, { once: true });
+
 // ================= 摄像头 + ASR =================
 (() => {
   const $camStatus = document.getElementById('camStatus');
@@ -376,6 +388,56 @@
           addMessage(text, true);  // 其它仍按右侧
         }
         $partial.textContent = '（等待音频…）';
+        return;
+      }
+      // 【TTS 音频播放】服务器推送的合成语音
+      if (s.startsWith('TTS_AUDIO:')){
+        const rest = s.slice(10); // "mp3:base64..." 或 "wav:base64..."
+        const colonIdx = rest.indexOf(':');
+        if (colonIdx > 0) {
+          const fmt = rest.slice(0, colonIdx);
+          const b64 = rest.slice(colonIdx + 1);
+          const mime = fmt === 'mp3' ? 'audio/mpeg' : 'audio/wav';
+          console.log(`[TTS] 收到音频 fmt=${fmt}, b64长度=${b64.length}`);
+          try {
+            const raw = atob(b64);
+            const ab = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) ab[i] = raw.charCodeAt(i);
+            const blob = new Blob([ab], { type: mime });
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+            audio.volume = 1.0;
+            const playPromise = audio.play();
+            if (playPromise) {
+              playPromise.then(() => {
+                console.log('[TTS] 播放成功');
+              }).catch(e => {
+                console.warn('[TTS] 自动播放被阻止，尝试用 AudioContext 解码播放:', e);
+                // 回退方案：使用 AudioContext 解码播放
+                try {
+                  const actx = new (window.AudioContext || window.webkitAudioContext)();
+                  fetch(url).then(r => r.arrayBuffer()).then(buf => {
+                    actx.decodeAudioData(buf, decoded => {
+                      const src = actx.createBufferSource();
+                      src.buffer = decoded;
+                      src.connect(actx.destination);
+                      src.start(0);
+                      console.log('[TTS] AudioContext 回退播放成功');
+                      src.onended = () => { URL.revokeObjectURL(url); actx.close(); };
+                    }, err => {
+                      console.error('[TTS] AudioContext 解码失败:', err);
+                      URL.revokeObjectURL(url);
+                    });
+                  });
+                } catch(e2) {
+                  console.error('[TTS] 回退播放也失败:', e2);
+                  URL.revokeObjectURL(url);
+                }
+              });
+            }
+            audio.onended = () => URL.revokeObjectURL(url);
+          } catch(e) { console.error('[TTS] 解码失败:', e); }
+        }
         return;
       }
     }

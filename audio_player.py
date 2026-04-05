@@ -41,10 +41,18 @@ AUDIO_MAP = {}
 
 # TTS 配置
 USE_TTS_FOR_UNKNOWN = True  # 对于未知的语音，使用 TTS 合成
-TTS_ENGINE = "local"  # 固定使用本地 TTS (pyttsx3)，零网络延迟
+TTS_ENGINE = os.getenv("TTS_ENGINE", "edge")  # edge=Edge TTS(推荐Linux), local=pyttsx3(仅Windows)
 
 # 本地播放标志：True=直接播放, False=通过HTTP流
-USE_LOCAL_PLAYBACK = True
+USE_LOCAL_PLAYBACK = os.getenv("USE_LOCAL_PLAYBACK", "false").lower() in ("1", "true", "yes")
+
+# TTS 音频推送回调（由 app_main.py 注册，用于将音频推送到浏览器）
+_tts_audio_callback = None
+
+def set_tts_audio_callback(callback):
+    """注册 TTS 音频回调，callback(audio_base64: str, fmt: str)"""
+    global _tts_audio_callback
+    _tts_audio_callback = callback
 
 # 音频缓存，避免重复读取
 _audio_cache = {}
@@ -225,10 +233,38 @@ def _audio_worker():
     _worker_loop.run_until_complete(process_queue())
 
 async def _broadcast_audio_optimized(pcm_data: bytes):
-    """优化的音频广播：本地直接播放（不依赖HTTP流）"""
+    """优化的音频广播：推送到浏览器或本地播放"""
     global _last_play_ts, _is_playing
 
-    # 【新增】本地播放模式：直接使用 sounddevice 播放
+    # 尝试推送到浏览器（headless 服务器场景）
+    if _tts_audio_callback and not USE_LOCAL_PLAYBACK:
+        try:
+            import base64
+            import io
+            import wave as wave_mod
+
+            with _playing_lock:
+                _is_playing = True
+
+            # 将 PCM16 8kHz 包装为 WAV 并 base64 编码
+            buf = io.BytesIO()
+            with wave_mod.open(buf, 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(8000)
+                wf.writeframes(pcm_data)
+            wav_bytes = buf.getvalue()
+            audio_b64 = base64.b64encode(wav_bytes).decode('ascii')
+            _tts_audio_callback(audio_b64, "wav")
+            _last_play_ts = time.monotonic()
+            return
+        except Exception as e:
+            print(f"[AUDIO] 浏览器推送失败: {e}，回退到本地播放")
+        finally:
+            with _playing_lock:
+                _is_playing = False
+
+    # 【本地播放模式】直接使用 sounddevice 播放
     if USE_LOCAL_PLAYBACK:
         try:
             import sounddevice as sd
@@ -470,30 +506,76 @@ def get_tts_status() -> tuple[bool, float]:
 
 def _synthesize_and_play(text: str):
     """
-    使用 TTS 合成语音并播放
+    使用 TTS 合成语音并推送到浏览器播放
     :param text: 要合成的文本
     """
     global _tts_playing, _tts_start_time
     try:
-        import audioop
         import time as time_module
 
-        if TTS_ENGINE == "local":
-            # 【本地 TTS】使用 pyttsx3（零网络延迟）
+        if TTS_ENGINE == "edge":
+            # 【Edge TTS】使用微软免费在线 TTS（音质好，Linux 兼容）
+            import edge_tts
+            import asyncio
+            import threading
+            import tempfile
+            import base64
+
+            def run_edge_tts():
+                global _tts_playing, _tts_start_time
+                try:
+                    _tts_playing = True
+                    _tts_start_time = time_module.time()
+                    print(f"[TTS] Edge TTS 开始合成: {text[:30]}...", flush=True)
+
+                    async def _gen():
+                        tmp = tempfile.NamedTemporaryFile(suffix='.mp3', delete=False)
+                        tmp_path = tmp.name
+                        tmp.close()
+                        communicate = edge_tts.Communicate(text, voice="zh-CN-XiaoxiaoNeural", rate="+10%")
+                        await communicate.save(tmp_path)
+                        return tmp_path
+
+                    loop = asyncio.new_event_loop()
+                    tmp_path = loop.run_until_complete(_gen())
+                    loop.close()
+
+                    # 读取 mp3 并推送到浏览器
+                    with open(tmp_path, 'rb') as f:
+                        audio_bytes = f.read()
+                    os.unlink(tmp_path)
+
+                    if _tts_audio_callback and audio_bytes:
+                        audio_b64 = base64.b64encode(audio_bytes).decode('ascii')
+                        _tts_audio_callback(audio_b64, "mp3")
+                        print(f"[TTS] Edge TTS 已推送到浏览器 ({len(audio_bytes)} bytes): {text[:30]}...", flush=True)
+                    else:
+                        print(f"[TTS] 无浏览器连接或音频为空，跳过播放", flush=True)
+                except Exception as e:
+                    print(f"[TTS] Edge TTS 失败: {e}", flush=True)
+                finally:
+                    time_module.sleep(2.0)
+                    _tts_playing = False
+
+            thread = threading.Thread(target=run_edge_tts, daemon=True)
+            thread.start()
+            return
+
+        elif TTS_ENGINE == "local":
+            # 【本地 TTS】使用 pyttsx3（仅 Windows）
             import pyttsx3
             import threading
 
             def play_local_tts():
                 global _tts_playing, _tts_start_time
                 try:
-                    # 标记 TTS 开始播放
                     _tts_playing = True
                     _tts_start_time = time_module.time()
                     print(f"[TTS] 开始播放: {text[:30]}...", flush=True)
 
                     engine = pyttsx3.init()
-                    engine.setProperty('rate', 150)  # 语速
-                    engine.setProperty('volume', 0.9)  # 音量
+                    engine.setProperty('rate', 150)
+                    engine.setProperty('volume', 0.9)
                     engine.say(text)
                     engine.runAndWait()
 
@@ -501,17 +583,15 @@ def _synthesize_and_play(text: str):
                 except Exception as e:
                     print(f"[TTS] 本地 TTS 播放失败: {e}", flush=True)
                 finally:
-                    # 延迟重置状态（留出时间让最后的语音被麦克风接收）
-                    time_module.sleep(2.0)  # 增加到 2 秒
+                    time_module.sleep(2.0)
                     _tts_playing = False
                     print(f"[TTS] TTS 播放窗口已结束", flush=True)
 
-            # 在后台线程中播放，避免阻塞
             thread = threading.Thread(target=play_local_tts, daemon=True)
             thread.start()
             return
 
-        print(f"[TTS] TTS 合成失败")
+        print(f"[TTS] 未知 TTS 引擎: {TTS_ENGINE}")
 
     except Exception as e:
         print(f"[TTS] TTS 异常: {e}")

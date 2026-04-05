@@ -75,7 +75,7 @@ from asr_core import (
     set_current_recognition,
     stop_current_recognition,
 )
-from audio_player import initialize_audio_system, play_voice_text
+from audio_player import initialize_audio_system, play_voice_text, set_tts_audio_callback
 # ---- Agent 模块 ----
 from simple_agent import SimpleAgent, AgentRequest
 # ---- 摄像头模块 ----
@@ -355,6 +355,20 @@ async def ui_broadcast_final(text: str):
         recent_finals = recent_finals[-RECENT_MAX:]
     await ui_broadcast_raw("FINAL:" + text)
     print(f"[ASR/AI FINAL] {text}", flush=True)
+
+
+# ============== TTS 音频推送到浏览器 ==============
+_main_event_loop = None  # 主事件循环引用，在 startup 中设置
+
+def _broadcast_tts_audio(audio_b64: str, fmt: str):
+    """从工作线程把 TTS 音频推送给所有浏览器客户端"""
+    if _main_event_loop and not _main_event_loop.is_closed():
+        asyncio.run_coroutine_threadsafe(
+            ui_broadcast_raw(f"TTS_AUDIO:{fmt}:{audio_b64}"),
+            _main_event_loop
+        )
+
+set_tts_audio_callback(_broadcast_tts_audio)
 
 
 # ============== ASR 广播包装函数（过滤 TTS 播放期间的输出） ==============
@@ -1532,13 +1546,16 @@ async def ws_camera(ws: WebSocket):
     try:
         while True:
             msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
             if "bytes" in msg and msg["bytes"]:
                 jpeg_bytes = msg["bytes"]
                 await loop.run_in_executor(None, _process_camera_frame, jpeg_bytes)
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        print(f"[CAMERA] Error: {e}", flush=True)
+        if "Cannot call" not in str(e):
+            print(f"[CAMERA] Error: {e}", flush=True)
     finally:
         print("[CAMERA] Browser camera disconnected", flush=True)
 
@@ -1737,12 +1754,13 @@ _startup_done = False
 # === 新增：注册给 bridge_io 的发送回调（把 JPEG 广播给 /ws/viewer） ===
 @app.on_event("startup")
 async def on_startup_register_bridge_sender():
-    global _startup_done
+    global _startup_done, _main_event_loop
     if _startup_done:
         return
 
     # 保存主线程的事件循环
     main_loop = asyncio.get_event_loop()
+    _main_event_loop = main_loop
     
     def _sender(jpeg_bytes: bytes):
         # 注意：这个函数可能在非协程线程里被调用，需要切回主事件循环

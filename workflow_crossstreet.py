@@ -931,15 +931,15 @@ class CrossStreetNavigator:
             if PIL_AVAILABLE:
                 try:
                     from PIL import Image as PILImage, ImageDraw, ImageFont
-                    # 尝试加载中文字体
+                    # 加载中文字体
+                    from utils import get_cjk_font_path
                     font = None
-                    for font_path in ["C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simhei.ttf"]:
-                        if os.path.exists(font_path):
-                            try:
-                                font = ImageFont.truetype(font_path, font_px)
-                                break
-                            except:
-                                continue
+                    _fp = get_cjk_font_path()
+                    if _fp:
+                        try:
+                            font = ImageFont.truetype(_fp, font_px)
+                        except:
+                            pass
                     if font:
                         bbox = ImageDraw.Draw(PILImage.new('RGB', (1, 1))).textbbox((0, 0), full_text, font=font)
                         tw = max(1, bbox[2] - bbox[0])
@@ -1012,21 +1012,14 @@ class CrossStreetNavigator:
             draw = ImageDraw.Draw(pil_img, "RGBA")
             env_scale = float(os.getenv("AIGLASS_PANEL_SCALE", "0.7"))
             base_font_size = max(10, int(round(14 * env_scale)))
+            from utils import get_cjk_font_path
             font = None
-            font_paths = [
-                "C:/Windows/Fonts/msyh.ttc",
-                "C:/Windows/Fonts/simhei.ttf",
-                "C:/Windows/Fonts/simsun.ttc",
-                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-                "/System/Library/Fonts/PingFang.ttc",
-            ]
-            for font_path in font_paths:
+            _fp = get_cjk_font_path()
+            if _fp:
                 try:
-                    if os.path.exists(font_path):
-                        font = ImageFont.truetype(font_path, base_font_size)
-                        break
+                    font = ImageFont.truetype(_fp, base_font_size)
                 except:
-                    continue
+                    pass
             if font is None:
                 font = ImageFont.load_default()
 

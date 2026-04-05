@@ -1,10 +1,40 @@
 # utils.py
 # -*- coding: utf-8 -*-
+import os
 import cv2
 import numpy as np
 import logging
 
 logger = logging.getLogger(__name__)
+
+# ========== 跨平台中文字体查找 ==========
+_FONT_CANDIDATES = [
+    # Windows
+    "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/msyh.ttf",
+    "C:/Windows/Fonts/simhei.ttf",
+    "C:/Windows/Fonts/simsun.ttc",
+    # Linux (apt install fonts-wqy-zenhei fonts-wqy-microhei)
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+    # macOS
+    "/System/Library/Fonts/PingFang.ttc",
+]
+
+_cached_font_path = None
+
+def get_cjk_font_path():
+    """返回可用的中文字体路径，找不到返回 None"""
+    global _cached_font_path
+    if _cached_font_path is not None:
+        return _cached_font_path
+    for p in _FONT_CANDIDATES:
+        if os.path.exists(p):
+            _cached_font_path = p
+            return p
+    return None
 
 # 物品名称到YOLO类别的映射
 ITEM_TO_CLASS_MAP = {
