@@ -828,7 +828,7 @@ class BlindPathNavigator:
                   f"rest={(_pf_t5-_pf_t4)*1000:.0f}ms "
                   f"total={(_pf_t5-_pf_t0)*1000:.0f}ms", flush=True)
         return ProcessingResult(
-            guidance_text=guidance_text,
+            guidance_text="",
             visualizations=frame_visualizations,
             annotated_image=annotated_image,
             state_info={
@@ -1504,7 +1504,7 @@ class BlindPathNavigator:
         # 提取路径特征
         features = self._get_pixel_domain_features(mask, image.shape)
         if not features:
-            return "路径特征提取失败"
+            return ""
         self._add_navigation_info_visualization(features, image_height, image_width, frame_visualizations)
         
         # 转弯检测

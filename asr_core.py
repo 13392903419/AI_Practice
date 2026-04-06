@@ -112,6 +112,8 @@ class ASRCallback:
         self._last_partial_for_ui: str = ""   # 只用于 UI 展示
         self._last_final_text: str = ""       # 以句末 final 为准
         self._hot_interrupted: bool = False   # 本句是否因热词触发过复位（防抖）
+        self._last_final_dedup: str = ""      # 去重：上一次 final 文本
+        self._last_final_time: float = 0.0    # 去重：上一次 final 时间戳
 
         self._ui_partial = ui_broadcast_partial
         self._ui_final   = ui_broadcast_final
@@ -182,6 +184,18 @@ class ASRCallback:
         # ---------- ③ final：仅 final 驱动 LLM（若未在播报） ----------
         if is_end is True:
             final_text = text
+
+            # ---------- 去重：同一句话 2 秒内不重复处理 ----------
+            import time as _time
+            _now = _time.time()
+            if final_text == self._last_final_dedup and (_now - self._last_final_time) < 2.0:
+                print(f"[ASR DEDUP] 跳过重复 final: '{final_text}'", flush=True)
+                self._last_partial_for_ui = ""
+                self._hot_interrupted = False
+                return
+            self._last_final_dedup = final_text
+            self._last_final_time = _now
+
             try:
                 print(f"[ASR FINAL]  len={len(final_text)} text='{final_text}'", flush=True)
                 self._post(self._ui_final(final_text))

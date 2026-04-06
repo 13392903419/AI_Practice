@@ -280,6 +280,12 @@ document.addEventListener('click', function _unlockAudio() {
   let micProcessor = null;
 
   async function startMic() {
+    // 防重复连接：如果已有活跃连接，不再创建
+    if (micWs && micWs.readyState <= WebSocket.OPEN) {
+      console.log('[Mic] 已有活跃连接，跳过重复连接');
+      return;
+    }
+    stopMic(); // 清理残留
     try {
       micStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }, video: false });
       // 使用浏览器默认采样率，后面重采样到 16kHz

@@ -616,7 +616,7 @@ async def start_ai_with_text_custom(user_text: str):
             traceback.print_exc()
 
     # 【修改】在导航模式下，检查是否允许进入 chat 模式
-    if orchestrator:
+    if orchestrator and not chat_mode_enabled:
         current_state = orchestrator.get_state()
         # 如果在导航模式或红绿灯检测模式（非CHAT模式, 非Item_Search模式）
         if current_state not in ["CHAT", "IDLE"]:
@@ -1357,10 +1357,25 @@ async def ws_ui(ws: WebSocket):
         ui_clients.pop(id(ws), None)
 
 # ---------- WebSocket：音频入口（ASR 上行） 支持电脑麦克风 ----------
+_active_audio_ws: Optional[WebSocket] = None   # 互斥：只允许一个活跃的音频 WS
+
 @app.websocket("/ws_audio")
 async def ws_audio(ws: WebSocket):
-    global esp32_audio_ws
+    global esp32_audio_ws, _active_audio_ws
+
+    # 踢掉旧连接：先停 ASR，再关 WebSocket
+    if _active_audio_ws is not None:
+        old_ws = _active_audio_ws
+        _active_audio_ws = None
+        await stop_current_recognition()
+        try:
+            await old_ws.close(code=1000, reason="new_connection")
+        except Exception:
+            pass
+        print("[AUDIO] 旧连接已踢掉")
+
     esp32_audio_ws = ws
+    _active_audio_ws = ws
     await ws.accept()
     print("\n[AUDIO] client connected")
     recognition = None
@@ -1489,6 +1504,8 @@ async def ws_audio(ws: WebSocket):
             pass
         if esp32_audio_ws is ws:
             esp32_audio_ws = None
+        if _active_audio_ws is ws:
+            _active_audio_ws = None
         print("[WS] connection closed")
 
 # ---------- WebSocket：浏览器/ESP32 相机入口（JPEG 二进制） ----------
@@ -1654,6 +1671,9 @@ def _yolo_worker_loop():
     global _yolo_input_frame, _yolo_busy, _yolo_last_result
     import time as _t
 
+    # 红绿灯语音播报状态（闭包变量）
+    _tl_state = [None, 0.0]  # [last_stable, last_say_ts]
+
     while True:
         # 取帧（JPEG bytes）
         jpeg_data = None
@@ -1707,7 +1727,24 @@ def _yolo_worker_loop():
                     import trafficlight_detection
                     result = trafficlight_detection.process_single_frame(f)
                     out = result['vis_image'] if result['vis_image'] is not None else f
-                    return out, ""
+                    # 根据稳定状态生成语音（状态变化立即播，同状态 3 秒间隔）
+                    tl_text = ""
+                    stable = result.get('stable_light')
+                    if stable:
+                        _tl_names = {"stop": "红灯", "go": "绿灯", "countdown_go": "黄灯", "countdown_stop": "红灯"}
+                        name = _tl_names.get(stable)
+                        if name:
+                            _now = _t.time()
+                            if stable != _tl_state[0]:
+                                tl_text = name
+                                _tl_state[0] = stable
+                                _tl_state[1] = _now
+                            elif _now - _tl_state[1] > 3.0:
+                                tl_text = name
+                                _tl_state[1] = _now
+                    if tl_text:
+                        play_voice_text(tl_text)
+                    return out, tl_text
                 else:
                     res = orchestrator.process_frame(f)
                     out = res.annotated_image if res.annotated_image is not None else f
