@@ -533,15 +533,7 @@ document.addEventListener('click', function _unlockAudio() {
   }
 
   $btnWebcam.onclick = () => webcamActive ? stopBrowserCamera() : startBrowserCamera();
-
-  // 默认自动启动摄像头
-  async function initDefaultCamera() {
-    connectCamera();
-    await new Promise(resolve => setTimeout(resolve, 200));
-    await startBrowserCamera();
-  }
-
-  // 页面加载时：启动电脑摄像头 + 连接 ASR
-  initDefaultCamera();
+    // 页面加载时：仅连接画面订阅和 ASR，不自动开启本机摄像头
+  connectCamera();
   connectASR();
 })();

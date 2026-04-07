@@ -53,6 +53,34 @@ API_KEY = os.getenv("DASHSCOPE_API_KEY", "sk-82107b037f5847ee90deb81f6f976e0f")
 if not API_KEY:
     raise RuntimeError("未设置 DASHSCOPE_API_KEY")
 
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+RUNTIME_MODE = os.getenv("RUNTIME_MODE", "pc_standalone").strip().lower()
+ACTIVE_VIDEO_SOURCE = os.getenv("ACTIVE_VIDEO_SOURCE", "pc").strip().lower()
+ACTIVE_AUDIO_SOURCE = os.getenv("ACTIVE_AUDIO_SOURCE", "pc").strip().lower()
+MOBILE_TEXT_TTS_ONLY = _env_bool("MOBILE_TEXT_TTS_ONLY", False)
+STARTUP_ENABLE_AUDIO_TESTS = _env_bool("STARTUP_ENABLE_AUDIO_TESTS", True)
+STARTUP_PRELOAD_MODELS = _env_bool("STARTUP_PRELOAD_MODELS", True)
+USE_LOCAL_QWEN = _env_bool("USE_LOCAL_QWEN", False)
+
+
+def _source_allowed(stream_kind: str, source: str) -> bool:
+    """手机优先模式下执行输入源仲裁；独立模式放行所有来源。"""
+    mode = RUNTIME_MODE
+    src = (source or "pc").strip().lower()
+    if mode != "phone_priority":
+        return True
+
+    expected = ACTIVE_AUDIO_SOURCE if stream_kind == "audio" else ACTIVE_VIDEO_SOURCE
+    expected = (expected or "pc").strip().lower()
+    return src == expected
+
 MODEL        = "paraformer-realtime-v2"
 SAMPLE_RATE  = 16000
 AUDIO_FMT    = "pcm"
@@ -360,11 +388,27 @@ async def ui_broadcast_final(text: str):
 # ============== TTS 音频推送到浏览器 ==============
 _main_event_loop = None  # 主事件循环引用，在 startup 中设置
 
+async def _broadcast_tts_audio_to_active_audio_ws(message: str):
+    """将 TTS 音频同时下发到当前活跃的 /ws_audio 客户端（手机兜底通道）。"""
+    ws = _active_audio_ws
+    if ws is None:
+        return
+    try:
+        if WebSocketState is None or ws.client_state == WebSocketState.CONNECTED:
+            await ws.send_text(message)
+    except Exception:
+        pass
+
 def _broadcast_tts_audio(audio_b64: str, fmt: str):
     """从工作线程把 TTS 音频推送给所有浏览器客户端"""
     if _main_event_loop and not _main_event_loop.is_closed():
+        payload = f"TTS_AUDIO:{fmt}:{audio_b64}"
         asyncio.run_coroutine_threadsafe(
-            ui_broadcast_raw(f"TTS_AUDIO:{fmt}:{audio_b64}"),
+            ui_broadcast_raw(payload),
+            _main_event_loop
+        )
+        asyncio.run_coroutine_threadsafe(
+            _broadcast_tts_audio_to_active_audio_ws(payload),
             _main_event_loop
         )
 
@@ -1086,6 +1130,17 @@ async def agent_status():
     }
 
 
+@app.get("/api/runtime/config")
+async def runtime_config():
+    """返回当前运行模式与输入源配置，便于 Android 端自检。"""
+    return {
+        "runtime_mode": RUNTIME_MODE,
+        "active_video_source": ACTIVE_VIDEO_SOURCE,
+        "active_audio_source": ACTIVE_AUDIO_SOURCE,
+        "mobile_text_tts_only": MOBILE_TEXT_TTS_ONLY,
+    }
+
+
 # ---------- TTS 缓存管理 API 【已移除，使用本地 TTS 无需缓存】----------
 # 本地 TTS (pyttsx3) 不需要缓存管理，相关 API 已删除
 
@@ -1362,9 +1417,10 @@ _active_audio_ws: Optional[WebSocket] = None   # 互斥：只允许一个活跃�
 @app.websocket("/ws_audio")
 async def ws_audio(ws: WebSocket):
     global esp32_audio_ws, _active_audio_ws
+    source = (ws.query_params.get("source") or "pc").strip().lower()
 
-    # 踢掉旧连接：先停 ASR，再关 WebSocket
-    if _active_audio_ws is not None:
+    # 互斥：新连接进来时踢掉旧连接，避免双端同时推流
+    if _active_audio_ws is not None and _active_audio_ws is not ws:
         old_ws = _active_audio_ws
         _active_audio_ws = None
         await stop_current_recognition()
@@ -1377,7 +1433,16 @@ async def ws_audio(ws: WebSocket):
     esp32_audio_ws = ws
     _active_audio_ws = ws
     await ws.accept()
-    print("\n[AUDIO] client connected")
+
+    # phone_priority 模式下按配置仲裁音频来源
+    if not _source_allowed("audio", source):
+        try:
+            await ws.send_text(f"REJECT:inactive_audio_source:{ACTIVE_AUDIO_SOURCE}")
+        finally:
+            await ws.close()
+        return
+
+    print(f"\n[AUDIO] client connected, source={source}")
     recognition = None
     streaming = False
     last_ts = time.monotonic()
@@ -1603,10 +1668,16 @@ def _display_worker_loop():
     while True:
         jpeg_bytes = None
         recv_ts = None
+        frame_source = "pc"
         with _latest_jpeg_lock:
             if _latest_jpeg is not None:
                 if isinstance(_latest_jpeg, tuple):
-                    jpeg_bytes, recv_ts = _latest_jpeg
+                    if len(_latest_jpeg) >= 3:
+                        jpeg_bytes, recv_ts, frame_source = _latest_jpeg[0], _latest_jpeg[1], _latest_jpeg[2]
+                    elif len(_latest_jpeg) == 2:
+                        jpeg_bytes, recv_ts = _latest_jpeg
+                    elif len(_latest_jpeg) == 1:
+                        jpeg_bytes = _latest_jpeg[0]
                 else:
                     jpeg_bytes = _latest_jpeg
                     recv_ts = _t.time()
@@ -1655,7 +1726,7 @@ def _display_worker_loop():
             # 4. 如果 YOLO 不忙，提交解码后的帧（YOLO 需要 numpy）
             if not _yolo_busy:
                 with _yolo_input_lock:
-                    _yolo_input_frame = (jpeg_bytes, recv_ts, display_start_ts)  # 传 JPEG，让 YOLO 线程自己解码
+                    _yolo_input_frame = (jpeg_bytes, recv_ts, display_start_ts, frame_source)  # 传 JPEG 和 source，让 YOLO 线程按来源处理
                 _cam_perf_add("yolo_submit_frames", 1)
             else:
                 _cam_perf_add("yolo_busy_skip_frames", 1)
@@ -1679,14 +1750,19 @@ def _yolo_worker_loop():
         jpeg_data = None
         recv_ts = None
         enqueue_ts = None
+        frame_source = "pc"
         with _yolo_input_lock:
             if _yolo_input_frame is not None:
                 payload = _yolo_input_frame
                 _yolo_input_frame = None
                 if isinstance(payload, tuple):
                     jpeg_data = payload[0]
-                    recv_ts = payload[1]
-                    enqueue_ts = payload[2]
+                    if len(payload) > 1:
+                        recv_ts = payload[1]
+                    if len(payload) > 2:
+                        enqueue_ts = payload[2]
+                    if len(payload) > 3 and payload[3]:
+                        frame_source = str(payload[3]).strip().lower()
                 else:
                     jpeg_data = payload
                     recv_ts = _t.time()
@@ -1711,7 +1787,10 @@ def _yolo_worker_loop():
         frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if frame is None:
             continue
-        frame = cv2.flip(frame, 1)
+
+        # 仅对 PC 源做镜像；手机后置 source=phone 不镜像。
+        if frame_source == "pc":
+            frame = cv2.flip(frame, 1)
 
         yolo_start_ts = _t.time()
         if enqueue_ts is not None:
@@ -1752,8 +1831,13 @@ def _yolo_worker_loop():
                         play_voice_text(res.guidance_text)
                     return out, res.guidance_text
 
-            result_frame, _ = processor.process_frame_optimized(
-                frame, current_state, process_func
+            result_frame, guidance_text = processor.process_frame_optimized(
+                frame, current_state, process_func, source=frame_source
+            )
+            # 每帧输出状态与引导文本（含空值），便于定位“为何未播报”
+            print(
+                f"[GUIDANCE-TRACE] state={current_state} guidance_text={repr(guidance_text)}",
+                flush=True,
             )
             _yolo_last_result = result_frame if result_frame is not None else frame
         except Exception as e:
@@ -1772,8 +1856,13 @@ def _yolo_worker_loop():
 @app.websocket("/ws/camera")
 async def ws_camera(ws: WebSocket):
     """接收浏览器摄像头推送的 JPEG 帧"""
+    source = (ws.query_params.get("source") or "pc").strip().lower()
     await ws.accept()
-    print("[CAMERA] Browser camera connected", flush=True)
+    if not _source_allowed("video", source):
+        await ws.close()
+        return
+
+    print(f"[CAMERA] camera source connected: {source}", flush=True)
 
     # 初始化导航器（如果还没初始化）
     global blind_path_navigator, cross_street_navigator, orchestrator
@@ -1804,7 +1893,7 @@ async def ws_camera(ws: WebSocket):
                     global _latest_jpeg
                     if _latest_jpeg is not None:
                         _cam_perf_add("overwrite_frames", 1)
-                    _latest_jpeg = (msg["bytes"], now_ts)
+                    _latest_jpeg = (msg["bytes"], now_ts, source)
                 _cam_perf_add("recv_frames", 1)
                 _cam_perf_report_if_due(now_ts)
     except WebSocketDisconnect:
@@ -1813,7 +1902,7 @@ async def ws_camera(ws: WebSocket):
         if "Cannot call" not in str(e):
             print(f"[CAMERA] Error: {e}", flush=True)
     finally:
-        print("[CAMERA] Browser camera disconnected", flush=True)
+        print(f"[CAMERA] camera source disconnected: {source}", flush=True)
 
 # ---------- WebSocket：浏览器订阅相机帧 ----------
 @app.websocket("/ws/viewer")
@@ -2059,6 +2148,9 @@ async def on_startup_init_audio():
 async def on_startup_audio_tests():
     if _startup_done:
         return
+    if not STARTUP_ENABLE_AUDIO_TESTS:
+        print("[AUDIO_TEST] 已禁用 startup 自动音频测试")
+        return
     """启动时自动启动音频测试（麦克风、扬声器）"""
     def _start():
         try:
@@ -2073,15 +2165,21 @@ async def on_startup_audio_tests():
 async def on_startup_preload_model():
     if _startup_done:
         return
+    if not STARTUP_PRELOAD_MODELS:
+        print("[MODEL] 已禁用 startup 模型预加载")
+        return
     """启动时预加载重型模型（LocalQwen + YOLOE 单例）"""
     def _preload():
-        try:
-            from local_qwen_client import get_local_qwen
-            print("[MODEL] 开始预加载 LocalQwen 模型...")
-            _ = get_local_qwen()
-            print("[MODEL] LocalQwen 模型预加载完成")
-        except Exception as e:
-            print(f"[MODEL] LocalQwen 预加载失败: {e}")
+        if USE_LOCAL_QWEN:
+            try:
+                from local_qwen_client import get_local_qwen
+                print("[MODEL] 开始预加载 LocalQwen 模型...")
+                _ = get_local_qwen()
+                print("[MODEL] LocalQwen 模型预加载完成")
+            except Exception as e:
+                print(f"[MODEL] LocalQwen 预加载失败: {e}")
+        else:
+            print("[MODEL] USE_LOCAL_QWEN=false，跳过 LocalQwen 预加载")
 
         try:
             # 预加载 YOLOE 单例（找物品模式专用）

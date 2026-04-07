@@ -46,6 +46,12 @@ class FrameSkipper:
 class ResolutionReducer:
     """降分辨率处理器 - 用小图处理，放大显示"""
 
+    # 按输入来源给目标处理尺寸：pc 维持 4:3，phone 维持 16:9
+    SOURCE_TARGETS = {
+        "pc": (320, 240),
+        "phone": (426, 240),
+    }
+
     def __init__(self, target_width: int = 320, target_height: int = 240):
         """
         Args:
@@ -55,13 +61,20 @@ class ResolutionReducer:
         self.target_width = target_width
         self.target_height = target_height
 
-    def resize_for_process(self, frame: np.ndarray) -> np.ndarray:
-        """缩小图像用于处理"""
+    def resize_for_process(self, frame: np.ndarray, source: str = "pc") -> np.ndarray:
+        """按来源做等比缩放，避免把 16:9 拉伸成 4:3。"""
         h, w = frame.shape[:2]
-        if (w, h) == (self.target_width, self.target_height):
+        src = (source or "pc").strip().lower()
+        target_w, target_h = self.SOURCE_TARGETS.get(src, (self.target_width, self.target_height))
+
+        if (w, h) == (target_w, target_h):
             return frame
-        return cv2.resize(frame, (self.target_width, self.target_height),
-                          interpolation=cv2.INTER_AREA)
+
+        # 等比缩放到目标框内（不补边），保持源图比例。
+        scale = min(target_w / float(w), target_h / float(h))
+        new_w = max(2, int(round(w * scale)))
+        new_h = max(2, int(round(h * scale)))
+        return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
     def resize_for_display(self, processed_frame: np.ndarray, target_size: Tuple[int, int]) -> np.ndarray:
         """放大处理结果用于显示"""
@@ -115,7 +128,8 @@ class OptimizedFrameProcessor:
     def process_frame_optimized(self,
                                frame: np.ndarray,
                                mode: str,
-                               process_func: Callable[[np.ndarray], Tuple[np.ndarray, str]]) -> Tuple[Optional[np.ndarray], Optional[str]]:
+                               process_func: Callable[[np.ndarray], Tuple[np.ndarray, str]],
+                               source: str = "pc") -> Tuple[Optional[np.ndarray], Optional[str]]:
         """
         优化的帧处理流程
 
@@ -133,8 +147,8 @@ class OptimizedFrameProcessor:
             return self.get_fallback_frame(), None
 
         try:
-            # 降分辨率处理
-            small_frame = self.rescaler.resize_for_process(frame)
+            # 按来源做等比降分辨率处理
+            small_frame = self.rescaler.resize_for_process(frame, source=source)
 
             # 处理
             processed_small, guidance = process_func(small_frame)
