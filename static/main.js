@@ -19,6 +19,8 @@ document.addEventListener('click', function _unlockAudio() {
   const $partial   = document.getElementById('partial');
   const $finalList = document.getElementById('finalList');
   const $btnClear  = document.getElementById('btnClear');
+  const $btnPcMic  = document.getElementById('btnPcMic');
+  const $btnPcTts  = document.getElementById('btnPcTts');
   const $btnWebcam = document.getElementById('btnWebcam');
   const $fps       = document.getElementById('fps');
   const canvas     = document.getElementById('canvas');
@@ -278,6 +280,55 @@ document.addEventListener('click', function _unlockAudio() {
   let micAudioCtx = null;
   let micStream = null;
   let micProcessor = null;
+  let pcMicEnabled = false;
+  let pcTtsPlaybackEnabled = false;
+
+  function renderPcAudioButtons() {
+    if ($btnPcMic) {
+      $btnPcMic.textContent = `电脑麦克风: ${pcMicEnabled ? '开' : '关'}`;
+      $btnPcMic.classList.toggle('primary', pcMicEnabled);
+      $btnPcMic.classList.toggle('ghost', !pcMicEnabled);
+    }
+    if ($btnPcTts) {
+      $btnPcTts.textContent = `电脑TTS播放: ${pcTtsPlaybackEnabled ? '开' : '关'}`;
+      $btnPcTts.classList.toggle('primary', pcTtsPlaybackEnabled);
+      $btnPcTts.classList.toggle('ghost', !pcTtsPlaybackEnabled);
+    }
+  }
+
+  async function loadClientConfig() {
+    try {
+      const r = await fetch('/api/client-config');
+      if (!r.ok) return;
+      const cfg = await r.json();
+      pcMicEnabled = !!cfg.pc_mic_auto_start;
+      pcTtsPlaybackEnabled = !!cfg.pc_tts_playback_enabled;
+    } catch (e) {
+      console.warn('[Config] 加载失败，使用默认值(麦克风关/TTS关):', e);
+    }
+  }
+
+  async function setServerTtsSynthMode(enableServerTtsSynth) {
+    try {
+      await fetch('/api/pc-audio-mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enableServerTtsSynth })
+      });
+    } catch (e) {
+      console.warn('[Config] 设置服务端TTS模式失败:', e);
+    }
+  }
+
+  function syncMicState() {
+    if (pcMicEnabled) {
+      if (wsUI && wsUI.readyState === WebSocket.OPEN) {
+        startMic();
+      }
+    } else {
+      stopMic();
+    }
+  }
 
   async function startMic() {
     // 防重复连接：如果已有活跃连接，不再创建
@@ -353,8 +404,8 @@ document.addEventListener('click', function _unlockAudio() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     wsUI = new WebSocket(`${proto}://${location.host}/ws_ui`);
     setBadge($asrStatus, false, 'ASR: connecting…');
-    wsUI.onopen  = ()=> { setBadge($asrStatus, true, 'ASR: connected'); startMic(); };
-    wsUI.onclose = ()=> setBadge($asrStatus, false, 'ASR: disconnected');
+    wsUI.onopen  = ()=> { setBadge($asrStatus, true, 'ASR: connected'); syncMicState(); };
+    wsUI.onclose = ()=> { setBadge($asrStatus, false, 'ASR: disconnected'); stopMic(); };
     wsUI.onerror = ()=> setBadge($asrStatus, false, 'ASR: error');
     wsUI.onmessage = (ev)=>{
       const s = ev.data || '';
@@ -398,6 +449,9 @@ document.addEventListener('click', function _unlockAudio() {
       }
       // 【TTS 音频播放】服务器推送的合成语音
       if (s.startsWith('TTS_AUDIO:')){
+        if (!pcTtsPlaybackEnabled) {
+          return;
+        }
         const rest = s.slice(10); // "mp3:base64..." 或 "wav:base64..."
         const colonIdx = rest.indexOf(':');
         if (colonIdx > 0) {
@@ -456,6 +510,22 @@ document.addEventListener('click', function _unlockAudio() {
     messages.forEach(msg => msg.remove());
     lastTimestamp = 0; // 重置时间戳计数
   };
+
+  if ($btnPcMic) {
+    $btnPcMic.onclick = () => {
+      pcMicEnabled = !pcMicEnabled;
+      renderPcAudioButtons();
+      syncMicState();
+    };
+  }
+
+  if ($btnPcTts) {
+    $btnPcTts.onclick = async () => {
+      pcTtsPlaybackEnabled = !pcTtsPlaybackEnabled;
+      renderPcAudioButtons();
+      await setServerTtsSynthMode(pcTtsPlaybackEnabled);
+    };
+  }
 
   // ===== 电脑摄像头：浏览器推帧到服务器 /ws/camera =====
   let webcamActive = false;
@@ -533,7 +603,15 @@ document.addEventListener('click', function _unlockAudio() {
   }
 
   $btnWebcam.onclick = () => webcamActive ? stopBrowserCamera() : startBrowserCamera();
+
+  async function initPage() {
+    await loadClientConfig();
+    renderPcAudioButtons();
+    await setServerTtsSynthMode(pcTtsPlaybackEnabled);
     // 页面加载时：仅连接画面订阅和 ASR，不自动开启本机摄像头
-  connectCamera();
-  connectASR();
+    connectCamera();
+    connectASR();
+  }
+
+  initPage();
 })();

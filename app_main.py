@@ -16,7 +16,7 @@ from workflow_blindpath import BlindPathNavigator
 from workflow_crossstreet import CrossStreetNavigator
 import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocketState
 import uvicorn
@@ -42,7 +42,8 @@ if sys.platform.startswith("win"):
 # ---- .env ----
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    # Force .env values to override inherited shell/system variables.
+    load_dotenv(override=True)
 except Exception:
     pass
 
@@ -65,6 +66,8 @@ RUNTIME_MODE = os.getenv("RUNTIME_MODE", "pc_standalone").strip().lower()
 ACTIVE_VIDEO_SOURCE = os.getenv("ACTIVE_VIDEO_SOURCE", "pc").strip().lower()
 ACTIVE_AUDIO_SOURCE = os.getenv("ACTIVE_AUDIO_SOURCE", "pc").strip().lower()
 MOBILE_TEXT_TTS_ONLY = _env_bool("MOBILE_TEXT_TTS_ONLY", False)
+PC_MIC_AUTO_START = _env_bool("PC_MIC_AUTO_START", False)
+PC_TTS_PLAYBACK_ENABLED = _env_bool("PC_TTS_PLAYBACK_ENABLED", False)
 STARTUP_ENABLE_AUDIO_TESTS = _env_bool("STARTUP_ENABLE_AUDIO_TESTS", True)
 STARTUP_PRELOAD_MODELS = _env_bool("STARTUP_PRELOAD_MODELS", True)
 USE_LOCAL_QWEN = _env_bool("USE_LOCAL_QWEN", False)
@@ -103,7 +106,7 @@ from asr_core import (
     set_current_recognition,
     stop_current_recognition,
 )
-from audio_player import initialize_audio_system, play_voice_text, set_tts_audio_callback
+from audio_player import initialize_audio_system, play_voice_text, set_tts_audio_callback, set_mobile_text_tts_only_mode
 # ---- Agent 模块 ----
 from simple_agent import SimpleAgent, AgentRequest
 # ---- 摄像头模块 ----
@@ -1023,6 +1026,35 @@ def root():
 @app.get("/api/health", response_class=PlainTextResponse)
 def health():
     return "OK"
+
+
+@app.get("/api/client-config")
+def client_config():
+    """Expose browser defaults for PC independent testing controls."""
+    return {
+        "pc_mic_auto_start": PC_MIC_AUTO_START,
+        "pc_tts_playback_enabled": PC_TTS_PLAYBACK_ENABLED,
+        "mobile_text_tts_only": MOBILE_TEXT_TTS_ONLY,
+    }
+
+
+@app.post("/api/pc-audio-mode")
+async def set_pc_audio_mode(req: Request):
+    """Temporarily override server TTS synth policy for PC independent testing."""
+    data = await req.json()
+    enable_server_tts_synth = bool(data.get("enableServerTtsSynth", False))
+
+    if enable_server_tts_synth:
+        set_mobile_text_tts_only_mode(False)
+        print("[AUDIO] PC independent test mode: server TTS synth enabled", flush=True)
+    else:
+        set_mobile_text_tts_only_mode(None)
+        print("[AUDIO] PC independent test mode: server TTS synth restored to env", flush=True)
+
+    return JSONResponse({
+        "ok": True,
+        "enableServerTtsSynth": enable_server_tts_synth,
+    })
 
 # ---------- Agent API ----------
 # 全局 Agent 单例

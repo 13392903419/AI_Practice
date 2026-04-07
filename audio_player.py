@@ -43,18 +43,36 @@ AUDIO_MAP = {}
 USE_TTS_FOR_UNKNOWN = True  # 对于未知的语音，使用 TTS 合成
 TTS_ENGINE = os.getenv("TTS_ENGINE", "edge")  # edge=Edge TTS(推荐Linux), local=pyttsx3(仅Windows)
 RUNTIME_MODE = os.getenv("RUNTIME_MODE", "pc_standalone").strip().lower()
-MOBILE_TEXT_TTS_ONLY = os.getenv("MOBILE_TEXT_TTS_ONLY", "false").lower() in ("1", "true", "yes")
 
 # 本地播放标志：True=直接播放, False=通过HTTP流
 USE_LOCAL_PLAYBACK = os.getenv("USE_LOCAL_PLAYBACK", "false").lower() in ("1", "true", "yes")
 
 # TTS 音频推送回调（由 app_main.py 注册，用于将音频推送到浏览器）
 _tts_audio_callback = None
+_mobile_text_tts_only_override = None
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def set_mobile_text_tts_only_mode(enabled):
+    """Runtime setter: True/False to force, None to fall back to env."""
+    global _mobile_text_tts_only_override
+    if enabled is None:
+        _mobile_text_tts_only_override = None
+    else:
+        _mobile_text_tts_only_override = bool(enabled)
 
 
 def _is_phone_text_tts_only_mode() -> bool:
-    """手机优先模式下，仅下发文本到手机端，本机不再输出语音二进制。"""
-    return RUNTIME_MODE == "phone_priority" and MOBILE_TEXT_TTS_ONLY
+    """返回手机 text-only 模式开关：用于禁止服务端 TTS 合成链路。"""
+    if _mobile_text_tts_only_override is not None:
+        return _mobile_text_tts_only_override
+    return _env_bool("MOBILE_TEXT_TTS_ONLY", False)
 
 def set_tts_audio_callback(callback):
     """注册 TTS 音频回调，callback(audio_base64: str, fmt: str)"""
@@ -243,11 +261,6 @@ async def _broadcast_audio_optimized(pcm_data: bytes):
     """优化的音频广播：推送到浏览器或本地播放"""
     global _last_play_ts, _is_playing
 
-    # 手机端本地 TTS 模式：服务端不再推送/播放音频，避免无效网络开销
-    if _is_phone_text_tts_only_mode():
-        _last_play_ts = time.monotonic()
-        return
-
     # 尝试推送到浏览器（headless 服务器场景）
     if _tts_audio_callback and not USE_LOCAL_PLAYBACK:
         try:
@@ -351,6 +364,7 @@ def initialize_audio_system():
     _worker_thread.start()
     _initialized = True
     _last_play_ts = 0.0
+    print(f"[AUDIO] MOBILE_TEXT_TTS_ONLY effective={_is_phone_text_tts_only_mode()}")
     
     # 显示压缩统计
     if os.getenv("AIGLASS_COMPRESS_AUDIO", "1") == "1":
@@ -447,12 +461,6 @@ def play_voice_text(text: str):
     current_time = time.time()
     if text == _last_voice_text and current_time - _last_voice_time < _voice_cooldown:
         return  # 静默跳过
-
-    # 手机端本地 TTS 模式：仅保留文本下发，不在服务端触发音频播放
-    if _is_phone_text_tts_only_mode():
-        _last_voice_text = text
-        _last_voice_time = current_time
-        return
 
     candidates = []
     t = text.strip()
