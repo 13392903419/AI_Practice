@@ -66,6 +66,15 @@ class YoloEBackend:
         id2name = r.names if hasattr(r, "names") else {}
         N = mask_arr.shape[0]
 
+        def _resolve_class_name(name_map, class_id: int) -> str:
+            if isinstance(name_map, dict):
+                return str(name_map.get(class_id, class_id))
+            if isinstance(name_map, (list, tuple)):
+                if 0 <= class_id < len(name_map):
+                    return str(name_map[class_id])
+                return str(class_id)
+            return str(class_id)
+
         if boxes_obj is not None:
             xyxy = boxes_obj.xyxy.cpu().numpy()
             cls  = boxes_obj.cls.cpu().tolist()
@@ -83,6 +92,6 @@ class YoloEBackend:
             out["boxes"].append(tuple(xyxy[i]) if xyxy[i] is not None else None)
             cid = int(cls[i]) if cls is not None else 0
             out["cls_ids"].append(cid)
-            out["names"].append(id2name.get(cid, str(cid)))
+            out["names"].append(_resolve_class_name(id2name, cid))
             out["ids"].append(int(tids[i]) if tids[i] is not None else None)
         return out
