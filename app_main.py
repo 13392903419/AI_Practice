@@ -68,7 +68,7 @@ ACTIVE_AUDIO_SOURCE = os.getenv("ACTIVE_AUDIO_SOURCE", "pc").strip().lower()
 MOBILE_TEXT_TTS_ONLY = _env_bool("MOBILE_TEXT_TTS_ONLY", False)
 PC_MIC_AUTO_START = _env_bool("PC_MIC_AUTO_START", False)
 PC_TTS_PLAYBACK_ENABLED = _env_bool("PC_TTS_PLAYBACK_ENABLED", False)
-STARTUP_ENABLE_AUDIO_TESTS = _env_bool("STARTUP_ENABLE_AUDIO_TESTS", True)
+STARTUP_ENABLE_AUDIO_TESTS = _env_bool("STARTUP_ENABLE_AUDIO_TESTS", False)
 STARTUP_PRELOAD_MODELS = _env_bool("STARTUP_PRELOAD_MODELS", True)
 USE_LOCAL_QWEN = _env_bool("USE_LOCAL_QWEN", False)
 
@@ -84,7 +84,7 @@ def _source_allowed(stream_kind: str, source: str) -> bool:
     expected = (expected or "pc").strip().lower()
     return src == expected
 
-MODEL        = "paraformer-realtime-v2"
+MODEL        = "paraformer-realtime-8k-v2"
 SAMPLE_RATE  = 16000
 AUDIO_FMT    = "pcm"
 CHUNK_MS     = 20
@@ -620,6 +620,7 @@ async def start_ai_with_text_custom(user_text: str):
             else:
                 # 传递 orchestrator 给 Agent
                 agent.tool_executor.set_nav_master(orchestrator)
+                agent.tool_executor.stop_yolomedia_fn = stop_yolomedia
 
             # 先用快速热词路由，不调 LLM
             from simple_agent import _fast_hotword_route
@@ -661,6 +662,7 @@ async def start_ai_with_text_custom(user_text: str):
             import traceback
             print(f"[AGENT] 处理失败: {e}")
             traceback.print_exc()
+            
 
     # 【修改】在导航模式下，检查是否允许进入 chat 模式
     if orchestrator and not chat_mode_enabled:

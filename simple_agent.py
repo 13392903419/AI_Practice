@@ -134,6 +134,7 @@ class ToolExecutor:
 
     def __init__(self):
         self.nav_master: Optional[NavigationMaster] = None
+        self.stop_yolomedia_fn = None  # 由 app_main.py 注册，停止 yolomedia 线程
 
     def set_nav_master(self, nav_master: NavigationMaster):
         """设置 NavigationMaster 实例"""
@@ -260,6 +261,11 @@ class ToolExecutor:
 
     async def _tool_find_object_end(self, params: Dict[str, Any]) -> str:
         """结束找物品"""
+        if self.stop_yolomedia_fn is not None:
+            try:
+                self.stop_yolomedia_fn()
+            except Exception:
+                pass
         self.nav_master.stop_item_search(restore_nav=True)
         return "已结束物品查找，恢复导航模式。"
 
