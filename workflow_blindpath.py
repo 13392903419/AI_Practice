@@ -200,6 +200,7 @@ class BlindPathNavigator:
         
         # 障碍物语音待播报
         self.pending_obstacle_voice = None
+        self.obstacle_preempt_interval = float(os.getenv("AIGLASS_OBS_PREEMPT_INTERVAL", "0.35"))
         
         # 红绿灯检测
         self.traffic_light_detector = None
@@ -221,9 +222,9 @@ class BlindPathNavigator:
 
         self.ONBOARDING_ORIENTATION_THRESHOLD_RAD = np.deg2rad(10)
         self.ONBOARDING_CENTER_OFFSET_THRESHOLD_RATIO = 0.15
-        self.NAV_ORIENTATION_THRESHOLD_RAD = np.deg2rad(10)
-        self.NAV_CENTER_OFFSET_THRESHOLD_RATIO = 0.15
-        self.CURVATURE_PROXY_THRESHOLD = 5e-5
+        self.NAV_ORIENTATION_THRESHOLD_RAD = np.deg2rad(16)
+        self.NAV_CENTER_OFFSET_THRESHOLD_RATIO = 0.18
+        self.CURVATURE_PROXY_THRESHOLD = 8e-5
         
         # 斑马线切换阈值
         self.CROSSWALK_SWITCH_AREA_RATIO = 0.22
@@ -233,6 +234,13 @@ class BlindPathNavigator:
         # 障碍物检测间隔（时间制：每 N 秒最多检测一次，避免慢模型阻塞显示线程）
         self.OBSTACLE_INTERVAL_SECS = float(os.getenv("AIGLASS_OBS_INTERVAL_SECS", "3.0"))
         self.OBSTACLE_CACHE_DURATION_SECS = self.OBSTACLE_INTERVAL_SECS + 1.0  # 缓存略长于间隔
+
+        # 近距离障碍物报警阈值（仅近距离报警，远处只显示不播报）
+        self.OBS_NEAR_Y_THRESHOLD = float(os.getenv("AIGLASS_OBS_NEAR_Y", "0.84"))
+        self.OBS_NEAR_AREA_THRESHOLD = float(os.getenv("AIGLASS_OBS_NEAR_AREA", "0.18"))
+        self.OBS_NEAR_MODE = os.getenv("AIGLASS_OBS_NEAR_MODE", "and").strip().lower()  # and/or
+        self.OBS_VERY_NEAR_Y = float(os.getenv("AIGLASS_OBS_VERY_NEAR_Y", "0.92"))
+        self.OBS_VERY_NEAR_AREA = float(os.getenv("AIGLASS_OBS_VERY_NEAR_AREA", "0.25"))
         
         # 障碍物播报管理
         self.last_obstacle_speech = ""
@@ -703,12 +711,19 @@ class BlindPathNavigator:
         # 2. 检查是否有障碍物语音（独立检查，确保最高优先级）
         if hasattr(self, 'pending_obstacle_voice'):
             if self.pending_obstacle_voice:
+                if isinstance(self.pending_obstacle_voice, dict):
+                    obs_text = self.pending_obstacle_voice.get('text', '')
+                    obs_danger = float(self.pending_obstacle_voice.get('danger', 1.0) or 1.0)
+                else:
+                    # 兼容旧格式
+                    obs_text = str(self.pending_obstacle_voice)
+                    obs_danger = 1.0
                 voice_candidates.append({
-                    'text': self.pending_obstacle_voice,
+                    'text': obs_text,
                     'priority': 100,  # 障碍物始终最高优先级
-                    'source': 'obstacle'
+                    'source': 'obstacle',
+                    'danger': obs_danger,
                 })
-                self.pending_obstacle_voice = None  # 清除已处理的障碍物语音
         
         # 【新增】检查是否有斑马线语音
         if hasattr(self, 'pending_crosswalk_voice'):
@@ -716,22 +731,29 @@ class BlindPathNavigator:
                 voice_candidates.append({
                     'text': self.pending_crosswalk_voice['voice_text'],
                     'priority': self.pending_crosswalk_voice['priority'],
-                    'source': 'crosswalk'
+                    'source': 'crosswalk',
+                    'danger': 0.0,
                 })
                 self.pending_crosswalk_voice = None  # 清除已处理的斑马线语音
         
         # 3. 选择优先级最高的语音
         if voice_candidates:
             # 按优先级排序，取最高的
-            voice_candidates.sort(key=lambda x: x['priority'], reverse=True)
+            voice_candidates.sort(key=lambda x: (x['priority'], x.get('danger', 0.0)), reverse=True)
             selected_voice = voice_candidates[0]
             final_guidance_text = selected_voice['text']
             
             # 全局播报冷却（避免任何语音重叠）
-            MIN_SPEECH_INTERVAL = 1.2  # 任意两条语音间隔至少0.8秒
+            MIN_SPEECH_INTERVAL = 1.2  # 普通语音最小间隔
+            obstacle_interval = max(0.15, float(getattr(self, 'obstacle_preempt_interval', 0.35)))
             if hasattr(self, 'last_any_speech_time'):
-                if current_time - self.last_any_speech_time < MIN_SPEECH_INTERVAL:
-                    final_guidance_text = ""  # 太快了，跳过这次播报
+                elapsed = current_time - self.last_any_speech_time
+                if selected_voice['source'] == 'obstacle':
+                    if elapsed < obstacle_interval:
+                        final_guidance_text = ""
+                else:
+                    if elapsed < MIN_SPEECH_INTERVAL:
+                        final_guidance_text = ""
             
             # 特殊处理保持直行的节流
             if final_guidance_text == "保持直行":
@@ -803,6 +825,10 @@ class BlindPathNavigator:
                     else:
                         play_voice_text(final_guidance_text)
                         logger.info(f"[语音播报] 优先级{selected_voice['priority']}: {final_guidance_text}")
+
+                    # 障碍物语音在成功发起播报后再清空，避免被其他语音挤掉
+                    if selected_voice.get('source') == 'obstacle':
+                        self.pending_obstacle_voice = None
                 except Exception as e:
                     logger.error(f"[语音播报] 播放失败: {e}")
         else:
@@ -1354,14 +1380,8 @@ class BlindPathNavigator:
         for obs in self.last_detected_obstacles:
             self._add_obstacle_visualization(obs, frame_visualizations)
         
-        # 优先检查近距离障碍物（提高阈值，只有非常近才报警）
-        NEAR_DISTANCE_Y_THRESHOLD = 0.75  # 提高到0.75
-        NEAR_DISTANCE_AREA_THRESHOLD = 0.12  # 提高到0.12
-        near_obstacles = [
-            obs for obs in self.last_detected_obstacles
-            if (obs.get('bottom_y_ratio', 0) > NEAR_DISTANCE_Y_THRESHOLD or
-                obs.get('area_ratio', 0) > NEAR_DISTANCE_AREA_THRESHOLD)
-        ]
+        # 优先检查近距离障碍物（统一使用严格近距判定）
+        near_obstacles = [obs for obs in self.last_detected_obstacles if self._is_near_obstacle(obs)]
         
         # 如果有近距离障碍物，应用相同的播报逻辑
         if near_obstacles:
@@ -2073,19 +2093,11 @@ class BlindPathNavigator:
             self.pending_obstacle_voice = None
             return
         
-        # 筛选近距离障碍物（提高阈值，只有非常近才报警）
-        NEAR_DISTANCE_Y_THRESHOLD = 0.75  # 提高到0.75，障碍物底部必须在画面下方75%以下
-        NEAR_DISTANCE_AREA_THRESHOLD = 0.12  # 提高到0.12，障碍物必须占画面12%以上
-        
-        near_obstacles = []
-        for obs in obstacles:
-            if (obs.get('bottom_y_ratio', 0) > NEAR_DISTANCE_Y_THRESHOLD or
-                obs.get('area_ratio', 0) > NEAR_DISTANCE_AREA_THRESHOLD):
-                near_obstacles.append(obs)
+        near_obstacles = [obs for obs in obstacles if self._is_near_obstacle(obs)]
         
         if near_obstacles:
-            # 获取最主要的障碍物（面积最大）
-            main_obstacle = max(near_obstacles, key=lambda x: x.get('area_ratio', 0))
+            # 获取最危险的障碍物（越靠近画面底部、占比越大越危险）
+            main_obstacle = max(near_obstacles, key=self._obstacle_danger_score)
             obstacle_name = main_obstacle.get('name', '')
             current_time = time.time()
             
@@ -2102,7 +2114,12 @@ class BlindPathNavigator:
                 self.last_obstacle_speech_time = current_time
             
             if should_announce:
-                self.pending_obstacle_voice = self._speech_for_obstacle(obstacle_name)
+                self.pending_obstacle_voice = {
+                    'text': self._speech_for_obstacle(obstacle_name),
+                    'danger': self._obstacle_danger_score(main_obstacle),
+                    'name': obstacle_name,
+                    'ts': current_time,
+                }
         else:
             # 没有近距离障碍物
             self.last_obstacle_speech = ""
@@ -2118,17 +2135,36 @@ class BlindPathNavigator:
         for obs in final_obstacles:
             self._add_obstacle_visualization(obs, frame_visualizations)
         
-        # 筛选近距离障碍物（提高阈值，只有非常近才报警）
-        NEAR_DISTANCE_Y_THRESHOLD = 0.75  # 提高到0.75，障碍物底部必须在画面下方75%以下
-        NEAR_DISTANCE_AREA_THRESHOLD = 0.12  # 提高到0.12，障碍物必须占画面12%以上
-        
-        near_obstacles = [
-            obs for obs in final_obstacles
-            if (obs.get('bottom_y_ratio', 0) > NEAR_DISTANCE_Y_THRESHOLD or
-                obs.get('area_ratio', 0) > NEAR_DISTANCE_AREA_THRESHOLD)
-        ]
+        near_obstacles = [obs for obs in final_obstacles if self._is_near_obstacle(obs)]
         
         return near_obstacles
+
+    def _is_near_obstacle(self, obs: Dict[str, Any]) -> bool:
+        """统一近距离障碍物判定：默认更严格，仅在足够近时才报警。"""
+        bottom_y_ratio = float(obs.get('bottom_y_ratio', 0.0) or 0.0)
+        area_ratio = float(obs.get('area_ratio', 0.0) or 0.0)
+
+        # 极近距离兜底：任一维度达到极近即报警
+        if bottom_y_ratio >= self.OBS_VERY_NEAR_Y or area_ratio >= self.OBS_VERY_NEAR_AREA:
+            return True
+
+        near_by_y = bottom_y_ratio >= self.OBS_NEAR_Y_THRESHOLD
+        near_by_area = area_ratio >= self.OBS_NEAR_AREA_THRESHOLD
+
+        if self.OBS_NEAR_MODE == 'or':
+            return near_by_y or near_by_area
+        return near_by_y and near_by_area
+
+    def _obstacle_danger_score(self, obs: Dict[str, Any]) -> float:
+        """障碍物危险度分数：越靠近底部、面积越大分数越高。"""
+        bottom_y_ratio = float(obs.get('bottom_y_ratio', 0.0) or 0.0)
+        area_ratio = float(obs.get('area_ratio', 0.0) or 0.0)
+
+        area_norm = min(area_ratio / max(self.OBS_VERY_NEAR_AREA, 1e-6), 1.0)
+        score = (0.75 * bottom_y_ratio) + (0.25 * area_norm)
+        if bottom_y_ratio >= self.OBS_VERY_NEAR_Y or area_ratio >= self.OBS_VERY_NEAR_AREA:
+            score += 1.0
+        return score
     
     def _plan_avoidance(self, obstacle_info, image_width):
         """规划避障路径"""
@@ -2174,19 +2210,19 @@ class BlindPathNavigator:
             "color": "red"
         })
         
-        # 计算导航指令（优先级：转向/平移 > 直行）
+        # 计算导航指令（优先级：平移 > 转向 > 直行）
         center_offset_pixels = x_target - image_width / 2
         center_offset_ratio = abs(center_offset_pixels) / image_width
         orientation_error_rad = features['tangent_angle_rad']
         
-        # 先检查是否需要转向（左转/右转）
-        if orientation_error_rad > self.NAV_ORIENTATION_THRESHOLD_RAD:
+        # 先检查是否需要平移（左移/右移），优先回到中线
+        if center_offset_ratio > self.NAV_CENTER_OFFSET_THRESHOLD_RATIO:
+            guidance_text = "右移" if center_offset_pixels > 0 else "左移"
+        # 再检查是否需要转向（左转/右转）
+        elif orientation_error_rad > self.NAV_ORIENTATION_THRESHOLD_RAD:
             guidance_text = "左转"
         elif orientation_error_rad < -self.NAV_ORIENTATION_THRESHOLD_RAD:
             guidance_text = "右转"
-        # 再检查是否需要平移（左移/右移）
-        elif center_offset_ratio > self.NAV_CENTER_OFFSET_THRESHOLD_RATIO:
-            guidance_text = "右移" if center_offset_pixels > 0 else "左移"
         # 最后才是直行
         else:
             guidance_text = "保持直行"

@@ -532,6 +532,8 @@ document.addEventListener('click', function _unlockAudio() {
   let cameraStream = null;
   let cameraWs = null;
   let cameraFrameTimer = null;
+  const CAMERA_PUSH_INTERVAL_MS = 40; // 25fps
+  const CAMERA_JPEG_QUALITY = 0.70;   // 略降码率，减轻传输与解码负担
   const cameraCanvas = document.createElement('canvas');
   const cameraCtx = cameraCanvas.getContext('2d');
   const cameraVideo = document.createElement('video');
@@ -555,7 +557,7 @@ document.addEventListener('click', function _unlockAudio() {
 
       cameraWs.onopen = () => {
         console.log('[Camera] WebSocket 推帧已连接');
-        // 每 66ms 推一帧（约 15fps，显示与YOLO已分离不会阻塞）
+        // 每 50ms 推一帧（约 20fps）
         cameraFrameTimer = setInterval(() => {
           if (cameraWs.readyState !== WebSocket.OPEN) return;
           const vw = cameraVideo.videoWidth, vh = cameraVideo.videoHeight;
@@ -567,8 +569,8 @@ document.addEventListener('click', function _unlockAudio() {
             if (blob && cameraWs.readyState === WebSocket.OPEN) {
               blob.arrayBuffer().then(buf => cameraWs.send(buf));
             }
-          }, 'image/jpeg', 0.75);
-        }, 66);
+          }, 'image/jpeg', CAMERA_JPEG_QUALITY);
+        }, CAMERA_PUSH_INTERVAL_MS);
       };
 
       cameraWs.onerror = e => console.error('[Camera] WebSocket 错误:', e);
