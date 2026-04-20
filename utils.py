@@ -119,7 +119,7 @@ _OBSTACLE_NAME_CN = {
     'truck': '卡车',
     'animal': '动物',
     'scooter': '电瓶车',
-    'stroller': '婴儿车',
+    #'stroller': '婴儿车',
     'dog': '狗',
 }
 

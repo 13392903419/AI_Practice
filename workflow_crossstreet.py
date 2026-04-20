@@ -1186,7 +1186,7 @@ class CrossStreetNavigator:
         if k == 'bus': return "前方有公交车，停一下。"
         if k == 'truck': return "前方有卡车，停一下。"
         if k == 'scooter': return "前方有电瓶车，停一下。"
-        if k == 'stroller': return "前方有婴儿车，停一下。"
+        if k == 'stroller': return "前方有电瓶车，停一下。"
         if k == 'dog': return "前方有狗，停一下。"
         if k == 'animal': return "前方有动物，停一下。"
         return "前方有障碍物，注意避让。"

@@ -105,7 +105,7 @@ class ObstacleDetectorClient:
             logger.error(f"设置 YOLOE 提示词失败: {e}")
             return []
 
-        conf_thr = float(os.getenv("AIGLASS_OBS_CONF", "0.25"))
+        conf_thr = float(os.getenv("AIGLASS_OBS_CONF", "0.30"))
         with gpu_infer_slot():
             results = self.model.predict(image, verbose=False, conf=conf_thr, imgsz=320, half=True)
 
@@ -143,10 +143,13 @@ class ObstacleDetectorClient:
             if (area / (H * W)) > 0.7: continue
 
             # 空间过滤：如果提供了 path_mask，则只保留路径上的障碍物
+            intersection_area = 0
+            path_overlap_ratio = 0.0
             if path_mask is not None:
-                intersection_area = np.sum(cv2.bitwise_and(mask, path_mask) > 0)
+                intersection_area = int(np.sum(cv2.bitwise_and(mask, path_mask) > 0))
+                path_overlap_ratio = float(intersection_area / max(area, 1))
                 # 必须与路径有足够的重叠
-                if intersection_area < 100 or (intersection_area / area) < 0.01:
+                if intersection_area < 40 and path_overlap_ratio < 0.01:
                     continue
 
             cls_id = int(results[0].boxes.cls[i])
@@ -170,7 +173,9 @@ class ObstacleDetectorClient:
                 'area_ratio': area / (H * W),
                 'center_x': np.mean(x_coords),
                 'center_y': np.mean(y_coords),
-                'bottom_y_ratio': np.max(y_coords) / H
+                'bottom_y_ratio': np.max(y_coords) / H,
+                'path_intersection_area': intersection_area,
+                'path_overlap_ratio': path_overlap_ratio,
             })
 
         return final_obstacles

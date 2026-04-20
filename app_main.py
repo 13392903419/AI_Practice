@@ -1677,18 +1677,7 @@ def _cam_perf_report_if_due(now_ts: Optional[float] = None):
             if key != "last_report":
                 _cam_perf[key] = 0 if key.endswith("_n") or key.endswith("_frames") else 0.0
 
-    print(
-        "[PERF] "
-        f"recv={recv_frames}/5s "
-        f"overwrite={overwrite_frames} "
-        f"display_delay={display_delay_avg:.1f}ms "
-        f"yolo_submit={yolo_submit_frames} "
-        f"yolo_busy_skip={yolo_busy_skip_frames} "
-        f"yolo_queue={yolo_queue_avg:.1f}ms "
-        f"yolo_proc={yolo_proc_avg:.1f}ms "
-        f"yolo_e2e={yolo_e2e_avg:.1f}ms",
-        flush=True,
-    )
+    # PERF 日志已关闭（保留统计逻辑以便后续按需恢复）
 
 
 def _display_worker_loop():
@@ -1867,11 +1856,6 @@ def _yolo_worker_loop():
 
             result_frame, guidance_text = processor.process_frame_optimized(
                 frame, current_state, process_func, source=frame_source
-            )
-            # 每帧输出状态与引导文本（含空值），便于定位“为何未播报”
-            print(
-                f"[GUIDANCE-TRACE] state={current_state} guidance_text={repr(guidance_text)}",
-                flush=True,
             )
             _yolo_last_result = result_frame if result_frame is not None else frame
         except Exception as e:

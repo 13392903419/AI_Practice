@@ -64,7 +64,7 @@ _OBSTACLE_NAME_CN = {
     'truck': '卡车',
     'animal': '动物',
     'scooter': '电瓶车',
-    'stroller': '婴儿车',
+    #'stroller': '婴儿车',
     'dog': '狗',
 }
 
@@ -211,7 +211,7 @@ class BlindPathNavigator:
         
         # 阈值设置
         self.CLASS_CONF_THRESHOLDS = {
-            1: 0.20,  # blind_path
+            1: 0.30,  # blind_path
             0: 0.30   # crosswalk
         }
         
@@ -222,9 +222,9 @@ class BlindPathNavigator:
 
         self.ONBOARDING_ORIENTATION_THRESHOLD_RAD = np.deg2rad(10)
         self.ONBOARDING_CENTER_OFFSET_THRESHOLD_RATIO = 0.15
-        self.NAV_ORIENTATION_THRESHOLD_RAD = np.deg2rad(16)
-        self.NAV_CENTER_OFFSET_THRESHOLD_RATIO = 0.18
-        self.CURVATURE_PROXY_THRESHOLD = 8e-5
+        self.NAV_ORIENTATION_THRESHOLD_RAD = np.deg2rad(30)
+        self.NAV_CENTER_OFFSET_THRESHOLD_RATIO = 0.20
+        self.CURVATURE_PROXY_THRESHOLD = 1e-3
         
         # 斑马线切换阈值
         self.CROSSWALK_SWITCH_AREA_RATIO = 0.22
@@ -232,7 +232,7 @@ class BlindPathNavigator:
         self.CROSSWALK_SWITCH_CONSECUTIVE_FRAMES = 10
         
         # 障碍物检测间隔（时间制：每 N 秒最多检测一次，避免慢模型阻塞显示线程）
-        self.OBSTACLE_INTERVAL_SECS = float(os.getenv("AIGLASS_OBS_INTERVAL_SECS", "3.0"))
+        self.OBSTACLE_INTERVAL_SECS = float(os.getenv("AIGLASS_OBS_INTERVAL_SECS", "1.0"))
         self.OBSTACLE_CACHE_DURATION_SECS = self.OBSTACLE_INTERVAL_SECS + 1.0  # 缓存略长于间隔
 
         # 近距离障碍物报警阈值（仅近距离报警，远处只显示不播报）
@@ -241,11 +241,12 @@ class BlindPathNavigator:
         self.OBS_NEAR_MODE = os.getenv("AIGLASS_OBS_NEAR_MODE", "and").strip().lower()  # and/or
         self.OBS_VERY_NEAR_Y = float(os.getenv("AIGLASS_OBS_VERY_NEAR_Y", "0.92"))
         self.OBS_VERY_NEAR_AREA = float(os.getenv("AIGLASS_OBS_VERY_NEAR_AREA", "0.25"))
+        self.OBS_PATH_OVERLAP_HIGH = float(os.getenv("AIGLASS_OBS_PATH_OVERLAP_HIGH", "0.10"))
         
         # 障碍物播报管理
         self.last_obstacle_speech = ""
         self.last_obstacle_speech_time = 0
-        self.obstacle_speech_cooldown = 5.0  # 相同障碍物3秒内不重复播报
+        self.obstacle_speech_cooldown = 5.0  # 相同障碍物5秒内不重复播报
         
         # 【方案B】障碍物后台线程 —— yoloe 在独立线程异步推理，不阻塞主 YOLO 线程
         self._obs_lock = threading.Lock()
@@ -531,8 +532,13 @@ class BlindPathNavigator:
                         f"位置=({obs.get('center_x', 0):.0f}, {obs.get('center_y', 0):.0f})")
             self._add_obstacle_visualization(obs, frame_visualizations)
         
+        crosswalk_active = False
+        if crosswalk_mask is not None and crosswalk_mask.size > 0:
+            crosswalk_area_ratio = float(np.sum(crosswalk_mask > 0) / crosswalk_mask.size)
+            crosswalk_active = crosswalk_area_ratio >= self.crosswalk_monitor.THRESHOLDS['discover']
+
         # 【新增】检查近距离障碍物并设置语音
-        self._check_and_set_obstacle_voice(detected_obstacles)
+        self._check_and_set_obstacle_voice(detected_obstacles, crosswalk_active=crosswalk_active)
         _pf_t4 = time.time()
         
         # 【新增】斑马线感知处理
@@ -557,6 +563,10 @@ class BlindPathNavigator:
             if not hasattr(self, 'pending_crosswalk_voice'):
                 self.pending_crosswalk_voice = None
             self.pending_crosswalk_voice = crosswalk_guidance
+            # 斑马线阶段清掉普通障碍物待播报，避免抢占“斑马线到了”等提示。
+            if isinstance(self.pending_obstacle_voice, dict):
+                if self.pending_obstacle_voice.get('mode') != 'crosswalk_emergency':
+                    self.pending_obstacle_voice = None
             logger.info(f"[斑马线语音] 已设置待播报语音: {crosswalk_guidance['voice_text']}, 优先级{crosswalk_guidance['priority']}")
         
         # 【新增】添加斑马线可视化
@@ -714,13 +724,18 @@ class BlindPathNavigator:
                 if isinstance(self.pending_obstacle_voice, dict):
                     obs_text = self.pending_obstacle_voice.get('text', '')
                     obs_danger = float(self.pending_obstacle_voice.get('danger', 1.0) or 1.0)
+                    obs_mode = str(self.pending_obstacle_voice.get('mode', 'near') or 'near')
                 else:
                     # 兼容旧格式
                     obs_text = str(self.pending_obstacle_voice)
                     obs_danger = 1.0
+                    obs_mode = 'near'
+
+                # 优先级策略：仅“盲道阻断”最高，其余障碍物低于斑马线与盲道导航。
+                obstacle_priority = 120 if obs_mode == 'blindpath_block' else 5
                 voice_candidates.append({
                     'text': obs_text,
-                    'priority': 100,  # 障碍物始终最高优先级
+                    'priority': obstacle_priority,
                     'source': 'obstacle',
                     'danger': obs_danger,
                 })
@@ -744,7 +759,7 @@ class BlindPathNavigator:
             final_guidance_text = selected_voice['text']
             
             # 全局播报冷却（避免任何语音重叠）
-            MIN_SPEECH_INTERVAL = 1.2  # 普通语音最小间隔
+            MIN_SPEECH_INTERVAL = 3 # 普通语音最小间隔
             obstacle_interval = max(0.15, float(getattr(self, 'obstacle_preempt_interval', 0.35)))
             if hasattr(self, 'last_any_speech_time'):
                 elapsed = current_time - self.last_any_speech_time
@@ -848,11 +863,6 @@ class BlindPathNavigator:
         
         # 8. 返回结果
         _pf_t5 = time.time()
-        if self.frame_counter % 5 == 0:
-            print(f"[BLINDPATH-TIMING] yolo_seg={(_pf_t2-_pf_t1)*1000:.0f}ms "
-                  f"obstacle={(_pf_t4-_pf_t3)*1000:.0f}ms "
-                  f"rest={(_pf_t5-_pf_t4)*1000:.0f}ms "
-                  f"total={(_pf_t5-_pf_t0)*1000:.0f}ms", flush=True)
         return ProcessingResult(
             guidance_text="",
             visualizations=frame_visualizations,
@@ -1552,34 +1562,8 @@ class BlindPathNavigator:
                         pass
         
         # 优先级1：障碍物检测（最高优先级）
-        obstacles = self._check_obstacles(image, mask, frame_visualizations)
-        if obstacles:
-            # 获取主要障碍物
-            main_obstacle = obstacles[0]
-            obstacle_name = main_obstacle.get('name', '')
-            current_time = time.time()
-            
-            # 检查是否需要播报（避免重复）
-            should_announce = False
-            if obstacle_name != self.last_obstacle_speech:
-                # 不同障碍物，立即播报
-                should_announce = True
-                self.last_obstacle_speech = obstacle_name
-                self.last_obstacle_speech_time = current_time
-            elif current_time - self.last_obstacle_speech_time > self.obstacle_speech_cooldown:
-                # 同一障碍物但超过冷却时间，再次播报
-                should_announce = True
-                self.last_obstacle_speech_time = current_time
-            
-            if should_announce:
-                # 不进入完整的避障流程，只是警告
-                # 设置待播报的障碍物语音，而不是直接返回
-                self.pending_obstacle_voice = self._speech_for_obstacle(obstacle_name)
-            # 如果不需要播报，继续常规导航
-        else:
-            # 没有障碍物，清空记录
-            self.last_obstacle_speech = ""
-            self.pending_obstacle_voice = None
+        # 这里只负责提交检测和绘制可视化，语音统一由 _check_and_set_obstacle_voice 处理。
+        self._check_obstacles(image, mask, frame_visualizations)
         
         # 优先级2：常规导航（左移/右移/左转/右转 > 直行）
         return self._generate_navigation_guidance(
@@ -2086,42 +2070,66 @@ class BlindPathNavigator:
             traceback.print_exc()
             return []
     
-    def _check_and_set_obstacle_voice(self, obstacles):
+    def _check_and_set_obstacle_voice(self, obstacles, crosswalk_active: bool = False):
         """检查障碍物并设置待播报的语音"""
         if not obstacles:
             self.last_obstacle_speech = ""
             self.pending_obstacle_voice = None
             return
-        
-        near_obstacles = [obs for obs in obstacles if self._is_near_obstacle(obs)]
-        
-        if near_obstacles:
-            # 获取最危险的障碍物（越靠近画面底部、占比越大越危险）
-            main_obstacle = max(near_obstacles, key=self._obstacle_danger_score)
+
+        if crosswalk_active:
+            # 斑马线阶段不让普通障碍物抢占语音，只保留真正极近的碰撞预警。
+            blocking_obstacles = []
+            near_obstacles = [obs for obs in obstacles if self._is_crosswalk_emergency_obstacle(obs)]
+            obstacle_mode = 'crosswalk_emergency'
+        else:
+            blocking_obstacles = [obs for obs in obstacles if self._is_blocking_blind_path(obs)]
+            near_obstacles = [obs for obs in obstacles if self._is_near_obstacle(obs)]
+            obstacle_mode = 'blindpath_block' if blocking_obstacles else 'near'
+
+        is_blind_path_blocked = bool(blocking_obstacles)
+        candidate_obstacles = blocking_obstacles if is_blind_path_blocked else near_obstacles
+
+        if candidate_obstacles:
+            # 获取最危险的障碍物（盲道阻断优先于普通近距障碍物）
+            main_obstacle = max(candidate_obstacles, key=self._obstacle_danger_score)
             obstacle_name = main_obstacle.get('name', '')
             current_time = time.time()
-            
+            speech_key = (
+                f"blindpath_block:{obstacle_name}"
+                if is_blind_path_blocked else
+                f"near:{obstacle_name}"
+            )
+            if crosswalk_active:
+                speech_key = f"crosswalk_emergency:{obstacle_name}"
+
             # 检查是否需要播报
             should_announce = False
-            if obstacle_name != self.last_obstacle_speech:
+            if speech_key != self.last_obstacle_speech:
                 # 不同障碍物，立即播报
                 should_announce = True
-                self.last_obstacle_speech = obstacle_name
+                self.last_obstacle_speech = speech_key
                 self.last_obstacle_speech_time = current_time
             elif current_time - self.last_obstacle_speech_time > self.obstacle_speech_cooldown:
                 # 同一障碍物但超过冷却时间，再次播报
                 should_announce = True
                 self.last_obstacle_speech_time = current_time
-            
+
             if should_announce:
+                voice_text = (
+                    self._speech_for_blind_path_block(obstacle_name)
+                    if is_blind_path_blocked else
+                    self._speech_for_obstacle(obstacle_name)
+                )
                 self.pending_obstacle_voice = {
-                    'text': self._speech_for_obstacle(obstacle_name),
-                    'danger': self._obstacle_danger_score(main_obstacle),
+                    'text': voice_text,
+                    'danger': self._obstacle_danger_score(main_obstacle) + (3.0 if is_blind_path_blocked else 0.0),
+                    'mode': obstacle_mode,
                     'name': obstacle_name,
                     'ts': current_time,
                 }
         else:
-            # 没有近距离障碍物
+            # 没有需要播报的障碍物
             self.last_obstacle_speech = ""
             self.pending_obstacle_voice = None
 
@@ -2143,6 +2151,11 @@ class BlindPathNavigator:
         """统一近距离障碍物判定：默认更严格，仅在足够近时才报警。"""
         bottom_y_ratio = float(obs.get('bottom_y_ratio', 0.0) or 0.0)
         area_ratio = float(obs.get('area_ratio', 0.0) or 0.0)
+        path_overlap_ratio = float(obs.get('path_overlap_ratio', 0.0) or 0.0)
+
+        # 与盲道高度重合时，直接视为高优先级近距障碍物
+        if path_overlap_ratio >= self.OBS_PATH_OVERLAP_HIGH:
+            return True
 
         # 极近距离兜底：任一维度达到极近即报警
         if bottom_y_ratio >= self.OBS_VERY_NEAR_Y or area_ratio >= self.OBS_VERY_NEAR_AREA:
@@ -2155,15 +2168,40 @@ class BlindPathNavigator:
             return near_by_y or near_by_area
         return near_by_y and near_by_area
 
+    def _is_blocking_blind_path(self, obs: Dict[str, Any]) -> bool:
+        """独立判定是否已挡住盲道，不依赖近距阈值。"""
+        path_overlap_ratio = float(obs.get('path_overlap_ratio', 0.0) or 0.0)
+        path_intersection_area = float(obs.get('path_intersection_area', 0.0) or 0.0)
+        bottom_y_ratio = float(obs.get('bottom_y_ratio', 0.0) or 0.0)
+
+        # 过滤远处轻微沾边的小噪声，避免过早误报。
+        if bottom_y_ratio < 0.28 and path_intersection_area < 80:
+            return False
+
+        return (
+            path_overlap_ratio >= self.OBS_PATH_OVERLAP_HIGH or
+            path_intersection_area >= 120
+        )
+
+    def _is_crosswalk_emergency_obstacle(self, obs: Dict[str, Any]) -> bool:
+        """斑马线阶段只保留真正极近的碰撞预警。"""
+        bottom_y_ratio = float(obs.get('bottom_y_ratio', 0.0) or 0.0)
+        area_ratio = float(obs.get('area_ratio', 0.0) or 0.0)
+        return bottom_y_ratio >= self.OBS_VERY_NEAR_Y or area_ratio >= self.OBS_VERY_NEAR_AREA
+
     def _obstacle_danger_score(self, obs: Dict[str, Any]) -> float:
         """障碍物危险度分数：越靠近底部、面积越大分数越高。"""
         bottom_y_ratio = float(obs.get('bottom_y_ratio', 0.0) or 0.0)
         area_ratio = float(obs.get('area_ratio', 0.0) or 0.0)
+        path_overlap_ratio = float(obs.get('path_overlap_ratio', 0.0) or 0.0)
 
         area_norm = min(area_ratio / max(self.OBS_VERY_NEAR_AREA, 1e-6), 1.0)
-        score = (0.75 * bottom_y_ratio) + (0.25 * area_norm)
+        score = (0.55 * bottom_y_ratio) + (0.15 * area_norm) + (0.30 * path_overlap_ratio)
         if bottom_y_ratio >= self.OBS_VERY_NEAR_Y or area_ratio >= self.OBS_VERY_NEAR_AREA:
             score += 1.0
+        # 盲道重合高，直接提升为同类中的最高播报优先级
+        if path_overlap_ratio >= self.OBS_PATH_OVERLAP_HIGH:
+            score += 2.0
         return score
     
     def _plan_avoidance(self, obstacle_info, image_width):
@@ -2622,10 +2660,14 @@ class BlindPathNavigator:
         if k == 'bus': return "前方有公交车，停一下。"
         if k == 'truck': return "前方有卡车，停一下。"
         if k == 'scooter': return "前方有电瓶车，停一下。"
-        if k == 'stroller': return "前方有婴儿车，停一下。"
+        if k == 'stroller': return "前方有电瓶车，停一下。"
         if k == 'dog': return "前方有狗，停一下。"
         if k == 'animal': return "前方有动物，停一下。"
         return "前方有障碍物，注意避让。"
+
+    def _speech_for_blind_path_block(self, name: str) -> str:
+        # 复用本地已缓存的障碍物播报文案，避免新句式触发慢合成。
+        return self._speech_for_obstacle(name)
 
     def _draw_command_button(self, image, text):
         """绘制底部中央的指令按钮（与斑马线模式统一）"""
@@ -3285,7 +3327,7 @@ class BlindPathNavigator:
         if k == 'bus': return "前方有公交车，停一下。"
         if k == 'truck': return "前方有卡车，停一下。"
         if k == 'scooter': return "前方有电瓶车，停一下。"
-        if k == 'stroller': return "前方有婴儿车，停一下。"
+        if k == 'stroller': return "前方有电瓶车，停一下。"
         if k == 'dog': return "前方有狗，停一下。"
         if k == 'animal': return "前方有动物，停一下。"
         return "前方有障碍物，注意避让。"
