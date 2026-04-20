@@ -220,7 +220,7 @@ class BlindPathNavigator:
         self.ONBOARDING_ALIGN_THRESHOLD_RATIO = 0.1
         self.VP_FIT_ERROR_THRESHOLD = 8.0
 
-        self.ONBOARDING_ORIENTATION_THRESHOLD_RAD = np.deg2rad(10)
+        self.ONBOARDING_ORIENTATION_THRESHOLD_RAD = np.deg2rad(20)
         self.ONBOARDING_CENTER_OFFSET_THRESHOLD_RATIO = 0.15
         self.NAV_ORIENTATION_THRESHOLD_RAD = np.deg2rad(30)
         self.NAV_CENTER_OFFSET_THRESHOLD_RATIO = 0.20
@@ -706,6 +706,12 @@ class BlindPathNavigator:
         
         # 【改进】语音优先级管理系统
         current_time = time.time()
+
+        # 绝对优先级：盲道阻断 > 过马路/斑马线 > 普通障碍 > 盲道导航
+        PRIORITY_BLINDPATH_BLOCK = 120
+        PRIORITY_CROSSWALK = 80
+        PRIORITY_OBSTACLE_NORMAL = 40
+        PRIORITY_NAVIGATION = 10
         
         # 收集所有可能的语音指令
         voice_candidates = []
@@ -714,7 +720,7 @@ class BlindPathNavigator:
         if guidance_text:
             voice_candidates.append({
                 'text': guidance_text,
-                'priority': self._get_voice_priority(guidance_text),
+                'priority': PRIORITY_NAVIGATION,
                 'source': 'navigation'
             })
         
@@ -731,8 +737,11 @@ class BlindPathNavigator:
                     obs_danger = 1.0
                     obs_mode = 'near'
 
-                # 优先级策略：仅“盲道阻断”最高，其余障碍物低于斑马线与盲道导航。
-                obstacle_priority = 120 if obs_mode == 'blindpath_block' else 5
+                obstacle_priority = (
+                    PRIORITY_BLINDPATH_BLOCK
+                    if obs_mode == 'blindpath_block'
+                    else PRIORITY_OBSTACLE_NORMAL
+                )
                 voice_candidates.append({
                     'text': obs_text,
                     'priority': obstacle_priority,
@@ -745,7 +754,7 @@ class BlindPathNavigator:
             if self.pending_crosswalk_voice:
                 voice_candidates.append({
                     'text': self.pending_crosswalk_voice['voice_text'],
-                    'priority': self.pending_crosswalk_voice['priority'],
+                    'priority': PRIORITY_CROSSWALK,
                     'source': 'crosswalk',
                     'danger': 0.0,
                 })
