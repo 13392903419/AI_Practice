@@ -276,7 +276,7 @@ def load_navigation_models():
 # 在程序启动时加载模型
 print("[NAVIGATION] 开始加载导航模型...")
 load_navigation_models()
-print(f"[NAVIGATION] 模型加载完成 - yolo_seg_model: {yolo_seg_model is not None}")
+print(f"[NAVIGATION] 模型加载完成 - yolo_seg_nano_model: {yolo_seg_nano_model is not None}")
 
 # 【已禁用】自动录制功能（如需启用，取消下方注释）
 # print("[RECORDER] 启动同步录制系统...")
