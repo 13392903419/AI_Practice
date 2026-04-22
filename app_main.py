@@ -1123,7 +1123,6 @@ async def ws_audio(ws: WebSocket):
             _active_audio_ws = None
         print("[WS] connection closed")
 
-# ---------- WebSocket：浏览器/ESP32 相机入口（JPEG 二进制） ----------
 # ---------- 最新帧缓冲区 + 双线程架构（显示 & YOLO 分离） ----------
 import threading as _cam_threading
 

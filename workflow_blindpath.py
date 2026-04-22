@@ -183,12 +183,23 @@ class BlindPathNavigator:
         self.direction_interval = float(os.getenv("AIGLASS_DIRECTION_INTERVAL", "3.0"))  # 方向指令间隔（秒）
         self.last_direction_time = 0.0
         self.last_direction_message = ""
+
+        # 导航语音去重：同文案优先抑制，仅在文案变化或达到重播窗口时放行
+        self.nav_same_suppress_count = int(os.getenv("AIGLASS_NAV_SAME_SUPPRESS_COUNT", "5"))
+        self.nav_same_reannounce_interval = float(os.getenv("AIGLASS_NAV_SAME_REANNOUNCE_INTERVAL", "12.0"))
+        self.last_nav_spoken_text = ""
+        self.last_nav_spoken_time = 0.0
+        self.same_nav_text_streak = 0
         
         # 打印配置信息
         logger.info(f"[BlindPath] 直行播报配置: 间隔={self.guide_interval}秒, "
                    f"持续模式={self.straight_continuous_mode}, "
                    f"限制次数={self.straight_repeat_limit}")
         logger.info(f"[BlindPath] 方向播报配置: 间隔={self.direction_interval}秒")
+        logger.info(
+            f"[BlindPath] 导航去重配置: 连续相同抑制={self.nav_same_suppress_count}次, "
+            f"重播间隔={self.nav_same_reannounce_interval}秒"
+        )
 
         # 缓存变量
         self.prev_gray = None
@@ -865,6 +876,23 @@ class BlindPathNavigator:
             elif final_guidance_text and selected_voice['source'] == 'crosswalk':
                 # 斑马线语音总是播报（不受重复检查限制）
                 self.last_any_speech_time = current_time
+
+            # 导航语音统一去重：相同文案连续出现时抑制，文案变化立即放行
+            if final_guidance_text and selected_voice.get('source') == 'navigation':
+                if final_guidance_text == self.last_nav_spoken_text:
+                    self.same_nav_text_streak += 1
+                    suppressing = self.same_nav_text_streak <= self.nav_same_suppress_count
+                    in_reannounce_window = (
+                        current_time - self.last_nav_spoken_time < self.nav_same_reannounce_interval
+                    )
+                    if suppressing or in_reannounce_window:
+                        final_guidance_text = ""
+                else:
+                    self.same_nav_text_streak = 0
+
+                if final_guidance_text:
+                    self.last_nav_spoken_text = final_guidance_text
+                    self.last_nav_spoken_time = current_time
                 
             # 播报选中的语音
             if final_guidance_text:
@@ -3307,6 +3335,11 @@ class BlindPathNavigator:
         self.last_obstacle_speech = ""
         self.last_obstacle_speech_time = 0
         self.last_any_speech_time = 0
+        self.last_direction_time = 0.0
+        self.last_direction_message = ""
+        self.last_nav_spoken_text = ""
+        self.last_nav_spoken_time = 0.0
+        self.same_nav_text_streak = 0
         self.crosswalk_ready_announced = False
         self.crosswalk_ready_time = 0
         self.traffic_light_history.clear()
