@@ -106,7 +106,14 @@ from asr_core import (
     set_current_recognition,
     stop_current_recognition,
 )
-from audio_player import initialize_audio_system, play_voice_text, set_tts_audio_callback, set_mobile_text_tts_only_mode
+from audio_player import (
+    initialize_audio_system,
+    play_voice_text as _raw_play_voice_text,
+    set_tts_audio_callback,
+    set_mobile_text_tts_only_mode,
+    bump_voice_generation,
+    get_voice_generation,
+)
 # ---- Agent 模块 ----
 from simple_agent import SimpleAgent, AgentRequest
 # ---- 摄像头模块 ----
@@ -550,9 +557,31 @@ def stop_yolomedia():
 # 全局变量：Chat 模式是否启用
 chat_mode_enabled = False
 
+# 当前模式对应的语音代际（mode generation）
+_mode_generation_id = 0
+
+
+def _switch_voice_generation(reason: str) -> int:
+    global _mode_generation_id
+    _mode_generation_id = bump_voice_generation(reason)
+    return _mode_generation_id
+
+
+def _get_mode_generation_id() -> int:
+    global _mode_generation_id
+    if _mode_generation_id <= 0:
+        _mode_generation_id = get_voice_generation()
+    return _mode_generation_id
+
+
+def play_voice_text(text: str, generation_id: int = None, priority: int = None, source: str = "app"):
+    """统一语音入口：默认绑定当前 mode generation，自动丢弃过期播报。"""
+    effective_generation = _get_mode_generation_id() if generation_id is None else generation_id
+    _raw_play_voice_text(text, generation_id=effective_generation, priority=priority, source=source)
+
 def play_voice_text_with_state(text: str):
     """包装 play_voice_text，TTS 状态管理已在 audio_player.py 内部处理"""
-    play_voice_text(text)
+    play_voice_text(text, source="state")
 
 async def start_ai_with_text_custom(user_text: str):
     """扩展版的AI启动函数，支持识别特殊命令"""
@@ -594,11 +623,13 @@ async def start_ai_with_text_custom(user_text: str):
     # 检查 "小慧小慧" 相关热词（必须包含 "小慧"）
     if any(keyword in clean_text for keyword in ["小慧", "小会", "晓辉", "xiaohui", "小惠", "小灰", "小辉"]):
         if "启动" in clean_text or "开始" in clean_text or "开启" in clean_text:
+            _switch_voice_generation("chat_mode_on")
             chat_mode_enabled = True
             play_voice_text("对话模式已开启")
             await ui_broadcast_final("[系统] 对话模式已开启，现在可以和我聊天了")
             return
         if "停止" in clean_text or "关闭" in clean_text or "结束" in clean_text:
+            _switch_voice_generation("chat_mode_off")
             chat_mode_enabled = False
             play_voice_text("对话模式已关闭")
             await ui_broadcast_final("[系统] 对话模式已关闭，只响应导航命令")
@@ -692,6 +723,7 @@ async def start_ai_with_text_custom(user_text: str):
             print("[ITEM_SEARCH] 从找物品模式切换到过马路")
         
         if orchestrator:
+            _switch_voice_generation("start_crossing")
             orchestrator.start_crossing()
             print(f"[CROSS_STREET] 过马路模式已启动，状态: {orchestrator.get_state()}")
             # 播放启动语音并广播到UI
@@ -705,6 +737,7 @@ async def start_ai_with_text_custom(user_text: str):
     
     if "过马路结束" in user_text or "结束过马路" in user_text:
         if orchestrator:
+            _switch_voice_generation("stop_crossing")
             orchestrator.stop_navigation()
             print(f"[CROSS_STREET] 导航已停止，状态: {orchestrator.get_state()}")
             # 播放停止语音并广播到UI
@@ -721,6 +754,7 @@ async def start_ai_with_text_custom(user_text: str):
             
             # 切换orchestrator到红绿灯检测模式（暂停盲道导航）
             if orchestrator:
+                _switch_voice_generation("start_traffic_light_detection")
                 orchestrator.start_traffic_light_detection()
                 print(f"[TRAFFIC] 切换到红绿灯检测模式，状态: {orchestrator.get_state()}")
             
@@ -741,6 +775,7 @@ async def start_ai_with_text_custom(user_text: str):
         try:
             # 恢复到对话模式
             if orchestrator:
+                _switch_voice_generation("stop_traffic_light_detection")
                 orchestrator.stop_navigation()  # 回到CHAT模式
                 print(f"[TRAFFIC] 红绿灯检测停止，恢复到{orchestrator.get_state()}模式")
             
@@ -758,6 +793,7 @@ async def start_ai_with_text_custom(user_text: str):
             print("[ITEM_SEARCH] 从找物品模式切换到盲道导航")
         
         if orchestrator:
+            _switch_voice_generation("start_blindpath_navigation")
             orchestrator.start_blind_path_navigation()
             print(f"[NAVIGATION] 盲道导航已启动，状态: {orchestrator.get_state()}")
             await ui_broadcast_final("[系统] 盲道导航已启动")
@@ -768,6 +804,7 @@ async def start_ai_with_text_custom(user_text: str):
     
     if "停止导航" in user_text or "结束导航" in user_text:
         if orchestrator:
+            _switch_voice_generation("stop_navigation")
             orchestrator.stop_navigation()
             print(f"[NAVIGATION] 导航已停止，状态: {orchestrator.get_state()}")
             await ui_broadcast_final("[系统] 盲道导航已停止")
@@ -778,6 +815,7 @@ async def start_ai_with_text_custom(user_text: str):
     nav_cmd_keywords = ["开始过马路", "过马路结束", "开始导航", "盲道导航", "停止导航", "结束导航", "立即通过", "现在通过", "继续"]
     if any(k in user_text for k in nav_cmd_keywords):
         if orchestrator:
+            _switch_voice_generation("nav_voice_command")
             orchestrator.on_voice_command(user_text)
             await ui_broadcast_final("[系统] 导航模式已更新")
         else:
@@ -799,6 +837,7 @@ async def start_ai_with_text_custom(user_text: str):
 
             # 【新增】切换到找物品模式（暂停导航）
             if orchestrator:
+                _switch_voice_generation("start_item_search")
                 orchestrator.start_item_search()
                 print(f"[ITEM_SEARCH] 已切换到找物品模式，状态: {orchestrator.get_state()}")
             
@@ -821,6 +860,7 @@ async def start_ai_with_text_custom(user_text: str):
         
         # 【新增】停止找物品模式，恢复之前的导航状态
         if orchestrator:
+            _switch_voice_generation("stop_item_search")
             orchestrator.stop_item_search(restore_nav=True)
             current_state = orchestrator.get_state()
             print(f"[ITEM_SEARCH] 找物品结束，当前状态: {current_state}")
@@ -851,6 +891,7 @@ async def start_ai_with_text_custom(user_text: str):
         # 只有在导航模式下才需要保存和切换
         if current_state not in ["CHAT", "IDLE"]:
             omni_previous_nav_state = current_state
+            _switch_voice_generation("omni_enter_chat")
             orchestrator.force_state("CHAT")
             print(f"[OMNI] 对话开始，从{current_state}切换到CHAT模式")
         else:
@@ -989,6 +1030,7 @@ async def start_ai_with_text(user_text: str):
 
             # 恢复之前的导航状态
             if orchestrator and omni_previous_nav_state:
+                _switch_voice_generation("omni_restore_previous_state")
                 orchestrator.force_state(omni_previous_nav_state)
                 print(f"[OMNI] 对话结束，恢复到{omni_previous_nav_state}模式")
                 omni_previous_nav_state = None
@@ -1128,18 +1170,20 @@ async def agent_command(request: dict):
 
         # 命令映射
         command_map = {
-            "start_blindpath": lambda: orchestrator.start_blind_path_navigation(),
-            "stop_navigation": lambda: orchestrator.stop_navigation(),
-            "start_crossing": lambda: orchestrator.start_crossing(),
-            "find_item": lambda: orchestrator.start_item_search(),
-            "traffic_light": lambda: orchestrator.start_traffic_light_detection(),
+            "start_blindpath": ("api_start_blindpath", lambda: orchestrator.start_blind_path_navigation()),
+            "stop_navigation": ("api_stop_navigation", lambda: orchestrator.stop_navigation()),
+            "start_crossing": ("api_start_crossing", lambda: orchestrator.start_crossing()),
+            "find_item": ("api_find_item", lambda: orchestrator.start_item_search()),
+            "traffic_light": ("api_traffic_light", lambda: orchestrator.start_traffic_light_detection()),
         }
 
         if command not in command_map:
             return {"error": f"未知命令: {command}"}
 
         # 执行命令
-        command_map[command]()
+        reason, command_fn = command_map[command]
+        _switch_voice_generation(reason)
+        command_fn()
 
         return {
             "success": True,
@@ -1301,12 +1345,16 @@ async def start_test(request: Request):
     # 启动对应的导航模式
     if orchestrator:
         if test_mode == "blindpath":
+            _switch_voice_generation("test_start_blindpath")
             orchestrator.start_blind_path_navigation()
         elif test_mode == "crossing":
+            _switch_voice_generation("test_start_crossing")
             orchestrator.start_crossing()
         elif test_mode == "trafficlight":
+            _switch_voice_generation("test_start_trafficlight")
             orchestrator.start_traffic_light_detection()
         elif test_mode == "itemsearch":
+            _switch_voice_generation("test_start_itemsearch")
             orchestrator.start_item_search()
 
     recorder.start_recording(video_path=video_name)
@@ -1332,6 +1380,7 @@ async def stop_test(request: Request):
 
     # 停止导航
     if orchestrator:
+        _switch_voice_generation("test_stop_navigation")
         orchestrator.stop_navigation()
 
     # 保存结果
@@ -1805,6 +1854,8 @@ def _yolo_worker_loop():
             _yolo_last_result = None
             continue
 
+        frame_generation = _get_mode_generation_id()
+
         # 解码 JPEG（只在 YOLO 线程做，不占显示线程）
         arr = np.frombuffer(jpeg_data, dtype=np.uint8)
         frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -1845,13 +1896,13 @@ def _yolo_worker_loop():
                                 tl_text = name
                                 _tl_state[1] = _now
                     if tl_text:
-                        play_voice_text(tl_text)
+                        play_voice_text(tl_text, generation_id=frame_generation, source="traffic_loop")
                     return out, tl_text
                 else:
                     res = orchestrator.process_frame(f)
                     out = res.annotated_image if res.annotated_image is not None else f
                     if res.guidance_text:
-                        play_voice_text(res.guidance_text)
+                        play_voice_text(res.guidance_text, generation_id=frame_generation, source="navigation_loop")
                     return out, res.guidance_text
 
             result_frame, guidance_text = processor.process_frame_optimized(

@@ -84,6 +84,7 @@ _audio_cache = {}
 
 # 音频播放队列和工作线程 - 使用优先级队列
 _audio_queue = queue.PriorityQueue(maxsize=10)
+_queue_lock = threading.Lock()
 _audio_priority = 0  # 递增的优先级计数器
 _worker_thread = None
 _worker_loop = None
@@ -91,6 +92,10 @@ _is_playing = False  # 标记是否正在播放音频
 _playing_lock = threading.Lock()  # 播放锁
 _initialized = False
 _last_play_ts = 0.0  # 记录上次播放结束时间，用于决定预热静音长度
+
+# 语音代际：模式切换时递增，用于丢弃旧线程/旧模式语音
+_voice_generation = 0
+_generation_lock = threading.Lock()
 
 def load_wav_file(filepath):
     """加载WAV文件并返回PCM数据（自动转换为8kHz）"""
@@ -196,11 +201,6 @@ def preload_all_audio():
     """预加载所有音频文件到内存"""
     print("[AUDIO] 开始预加载音频文件...")
     loaded_count = 0
-    
-    # 【暂时禁用变速】因为需要修改缓存机制
-    # 需要加速的音频列表（斑马线相关）
-    # speedup_keywords = ["斑马线", "画面"]
-    # speedup_factor = 1.3  # 加速30%
     
     for audio_key, filepath in AUDIO_MAP.items():
         if os.path.exists(filepath):
@@ -403,36 +403,42 @@ def play_audio_threadsafe(audio_key):
             return
     
     # 【优化】实时播报策略：保持队列最小化，避免积压延迟
-    queue_size = _audio_queue.qsize()
-    
-    # 检查是否正在播放
-    with _playing_lock:
-        currently_playing = _is_playing
-    
-    # 实时策略：只允许1个积压，超过立即清空
-    if queue_size > 0 and not currently_playing:
-        # 未播放时立即清空，播放最新语音
-        print(f"[AUDIO] 清空队列（当前{queue_size}个），播放最新语音")
-        _audio_queue = queue.PriorityQueue(maxsize=10)
-    elif queue_size > 1 and currently_playing:
-        # 正在播放时，如果积压>1个则清空（保持实时性）
-        print(f"[AUDIO] 队列积压({queue_size}个)，清空以保持实时")
-        _audio_queue = queue.PriorityQueue(maxsize=10)
-    try:
-        # 使用优先级队列，确保音频按顺序播放
-        _audio_priority += 1
-        _audio_queue.put_nowait((_audio_priority, pcm_data))
-        if queue_size >= 1:
-            print(f"[AUDIO] 播放队列当前大小: {queue_size + 1}")
-    except queue.Full:
-        # 播放队列满则丢弃，保持实时性
-        print(f"[AUDIO] 队列满，丢弃: {audio_key}")
-        pass
+    with _queue_lock:
+        queue_size = _audio_queue.qsize()
+
+        # 检查是否正在播放
+        with _playing_lock:
+            currently_playing = _is_playing
+
+        # 实时策略：只允许1个积压，超过立即清空
+        if queue_size > 0 and not currently_playing:
+            # 未播放时立即清空，播放最新语音
+            print(f"[AUDIO] 清空队列（当前{queue_size}个），播放最新语音")
+            _audio_queue = queue.PriorityQueue(maxsize=10)
+            queue_size = 0
+        elif queue_size > 1 and currently_playing:
+            # 正在播放时，如果积压>1个则清空（保持实时性）
+            print(f"[AUDIO] 队列积压({queue_size}个)，清空以保持实时")
+            _audio_queue = queue.PriorityQueue(maxsize=10)
+            queue_size = 0
+
+        try:
+            # 使用优先级队列，确保音频按顺序播放
+            _audio_priority += 1
+            _audio_queue.put_nowait((_audio_priority, pcm_data))
+            if queue_size >= 1:
+                print(f"[AUDIO] 播放队列当前大小: {queue_size + 1}")
+        except queue.Full:
+            # 播放队列满则丢弃，保持实时性
+            print(f"[AUDIO] 队列满，丢弃: {audio_key}")
+            pass
 
 # 全局语音节流
 _last_voice_time = 0
 _last_voice_text = ""
+_last_voice_priority = 0
 _voice_cooldown = 1.0  # 相同语音至少间隔1秒
+_voice_arbiter_lock = threading.Lock()
 
 # 语音优先级定义
 VOICE_PRIORITY = {
@@ -442,25 +448,99 @@ VOICE_PRIORITY = {
     'other': 30          # 其他 - 默认优先级
 }
 
+
+def get_voice_generation() -> int:
+    with _generation_lock:
+        return _voice_generation
+
+
+def bump_voice_generation(reason: str = "") -> int:
+    """
+    模式切换入口：
+    1) generation +1，旧 generation 的语音一律失效
+    2) 清空待播队列，避免旧语音拖尾
+    """
+    global _voice_generation, _audio_queue, _last_voice_time, _last_voice_text, _last_voice_priority
+
+    with _generation_lock:
+        _voice_generation += 1
+        new_gen = _voice_generation
+
+    with _queue_lock:
+        _audio_queue = queue.PriorityQueue(maxsize=10)
+
+    with _voice_arbiter_lock:
+        _last_voice_time = 0.0
+        _last_voice_text = ""
+        _last_voice_priority = 0
+
+    if reason:
+        print(f"[AUDIO][GEN] bump -> {new_gen}, reason={reason}")
+    else:
+        print(f"[AUDIO][GEN] bump -> {new_gen}")
+    return new_gen
+
+
+def _is_generation_valid(generation_id) -> bool:
+    return generation_id is None or int(generation_id) == get_voice_generation()
+
+
+def _infer_priority(text: str) -> int:
+    t = (text or "").strip()
+    if not t:
+        return VOICE_PRIORITY["other"]
+
+    obstacle_kw = ("障碍", "避让", "危险", "注意")
+    direction_kw = ("向左", "向右", "平移", "转")
+    straight_kw = ("直行", "向前")
+
+    if any(k in t for k in obstacle_kw):
+        return VOICE_PRIORITY["obstacle"]
+    if any(k in t for k in direction_kw):
+        return VOICE_PRIORITY["direction"]
+    if any(k in t for k in straight_kw):
+        return VOICE_PRIORITY["straight"]
+    return VOICE_PRIORITY["other"]
+
+
+def _arbiter_allow(text: str, priority: int) -> bool:
+    global _last_voice_time, _last_voice_text, _last_voice_priority
+
+    now = time.time()
+    with _voice_arbiter_lock:
+        # 同文案冷却
+        if text == _last_voice_text and now - _last_voice_time < _voice_cooldown:
+            return False
+
+        # 低优先级在短时间内不抢占高优先级
+        if now - _last_voice_time < 0.35 and priority < _last_voice_priority:
+            return False
+
+        _last_voice_time = now
+        _last_voice_text = text
+        _last_voice_priority = priority
+        return True
+
 # 新增：根据中文提示文案直接播放（会做轻度规范化与降级）
-def play_voice_text(text: str):
+def play_voice_text(text: str, generation_id=None, priority: int = None, source: str = "default"):
     """
     传入中文提示，自动匹配 voice 映射并播放。
     - 尝试原文
     - 尝试补全/去除句末标点（。.!！?？）
     - 若包含“前方有…注意避让”但未命中，降级到“前方有障碍物，注意避让。”
     """
-    global _last_voice_time, _last_voice_text
-    
     if not text:
         return
+
+    if not _is_generation_valid(generation_id):
+        return
+
     if not _initialized:
         initialize_audio_system()
-    
-    # 全局节流：相同文本短时间内不重复播放
-    current_time = time.time()
-    if text == _last_voice_text and current_time - _last_voice_time < _voice_cooldown:
-        return  # 静默跳过
+
+    resolved_priority = int(priority) if priority is not None else _infer_priority(text)
+    if not _arbiter_allow(text, resolved_priority):
+        return
 
     candidates = []
     t = text.strip()
@@ -478,8 +558,6 @@ def play_voice_text(text: str):
     for ck in candidates:
         if ck in AUDIO_MAP:
             play_audio_threadsafe(ck)
-            _last_voice_text = text
-            _last_voice_time = current_time
             return
 
     # 针对“前方有…注意避让”降级
@@ -487,30 +565,22 @@ def play_voice_text(text: str):
         fallback = "前方有障碍物，注意避让。"
         if fallback in AUDIO_MAP:
             play_audio_threadsafe(fallback)
-            _last_voice_text = text
-            _last_voice_time = current_time
             return
 
     # 针对”请向…平移/微调/转动”类词条，常见变体尝试
     base = t.rstrip(".！？")
     if base in AUDIO_MAP:
         play_audio_threadsafe(base)
-        _last_voice_text = text
-        _last_voice_time = current_time
         return
     if base + "." in AUDIO_MAP:
         play_audio_threadsafe(base +".")
-        _last_voice_text = text
-        _last_voice_time = current_time
         return
 
     # 【新增】TTS 合成：对于未知的语音，使用 TTS 合成
     if USE_TTS_FOR_UNKNOWN and len(text) <= 100:  # 限制长度，避免过长文本
-        print(f"[AUDIO] 使用 TTS 合成语音: {text[:30]}...")
+        print(f"[AUDIO] 使用 TTS 合成语音(source={source}): {text[:30]}...")
         # 直接调用，内部已用线程处理，无需 asyncio.create_task
-        _synthesize_and_play(text)
-        _last_voice_text = text
-        _last_voice_time = current_time
+        _synthesize_and_play(text, generation_id=generation_id)
         return
 
     # 未匹配则输出日志（便于调试）
@@ -530,13 +600,16 @@ def get_tts_status() -> tuple[bool, float]:
     """获取 TTS 播放状态（用于 ASR 过滤）"""
     return _tts_playing, _tts_start_time
 
-def _synthesize_and_play(text: str):
+def _synthesize_and_play(text: str, generation_id=None):
     """
     使用 TTS 合成语音并推送到浏览器播放
     :param text: 要合成的文本
     """
     global _tts_playing, _tts_start_time
     try:
+        if not _is_generation_valid(generation_id):
+            return
+
         if _is_phone_text_tts_only_mode():
             return
 
@@ -553,6 +626,9 @@ def _synthesize_and_play(text: str):
             def run_edge_tts():
                 global _tts_playing, _tts_start_time
                 try:
+                    if not _is_generation_valid(generation_id):
+                        return
+
                     _tts_playing = True
                     _tts_start_time = time_module.time()
                     print(f"[TTS] Edge TTS 开始合成: {text[:30]}...", flush=True)
@@ -573,6 +649,10 @@ def _synthesize_and_play(text: str):
                     with open(tmp_path, 'rb') as f:
                         audio_bytes = f.read()
                     os.unlink(tmp_path)
+
+                    if not _is_generation_valid(generation_id):
+                        print("[TTS] generation changed, 丢弃过期音频", flush=True)
+                        return
 
                     if _tts_audio_callback and audio_bytes:
                         audio_b64 = base64.b64encode(audio_bytes).decode('ascii')
@@ -598,6 +678,9 @@ def _synthesize_and_play(text: str):
             def play_local_tts():
                 global _tts_playing, _tts_start_time
                 try:
+                    if not _is_generation_valid(generation_id):
+                        return
+
                     _tts_playing = True
                     _tts_start_time = time_module.time()
                     print(f"[TTS] 开始播放: {text[:30]}...", flush=True)
