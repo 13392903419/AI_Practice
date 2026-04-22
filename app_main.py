@@ -132,6 +132,8 @@ from services.vision_pipeline_service import (
     ws_camera_receive_loop as _svc_ws_camera_receive_loop,
     ws_viewer_loop as _svc_ws_viewer_loop,
 )
+from services.api_agent_routes import register_agent_routes
+from services.api_runtime_routes import register_runtime_routes
 
 # ---- 同步录制器 ----
 import sync_recorder
@@ -829,116 +831,32 @@ def get_agent_instance() -> SimpleAgent:
         _agent_instance = SimpleAgent()
     return _agent_instance
 
-@app.post("/api/agent/chat")
-async def agent_chat(request: dict):
-    """
-    Agent 对话入口
-    请求格式:
-    {
-        "input": "用户输入文本",
-        "type": "text"  # 可选，默认 "text"
-    }
-    """
-    user_input = request.get("input", "")
-    input_type = request.get("type", "text")
 
-    if not user_input:
-        return {"error": "缺少输入"}
+def _register_split_api_routes():
+    register_agent_routes(
+        app,
+        {
+            "get_agent_instance": get_agent_instance,
+            "has_agent_instance": lambda: _agent_instance is not None,
+            "get_orchestrator": lambda: orchestrator,
+            "is_yolomedia_running": lambda: yolomedia_running,
+            "switch_voice_generation": _switch_voice_generation,
+        },
+    )
 
-    try:
-        agent = get_agent_instance()
-        agent_request = AgentRequest(
-            user_input=user_input,
-            input_type=input_type
-        )
-        response = await agent.process(agent_request)
-
-        return {
-            "success": True,
-            "response": response.text,
-            "intent": response.intent,
-            "tool_used": response.tool_used,
-            "state": response.state
-        }
-    except Exception as e:
-        print(f"[AGENT] Error: {e}")
-        return {"error": str(e)}
-
-@app.post("/api/agent/command")
-async def agent_command(request: dict):
-    """
-    Agent 命令模式 - 直接执行导航命令
-    请求格式:
-    {
-        "command": "start_blindpath" | "stop_navigation" | "start_crossing" | "find_item"
-        "params": {}  # 可选参数
-    }
-    """
-    command = request.get("command", "")
-    params = request.get("params", {})
-
-    if not command:
-        return {"error": "缺少命令"}
-
-    try:
-        global orchestrator
-
-        if not orchestrator:
-            return {"error": "导航系统未就绪"}
-
-        # 命令映射
-        command_map = {
-            "start_blindpath": ("api_start_blindpath", lambda: orchestrator.start_blind_path_navigation()),
-            "stop_navigation": ("api_stop_navigation", lambda: orchestrator.stop_navigation()),
-            "start_crossing": ("api_start_crossing", lambda: orchestrator.start_crossing()),
-            "find_item": ("api_find_item", lambda: orchestrator.start_item_search()),
-            "traffic_light": ("api_traffic_light", lambda: orchestrator.start_traffic_light_detection()),
-        }
-
-        if command not in command_map:
-            return {"error": f"未知命令: {command}"}
-
-        # 执行命令
-        reason, command_fn = command_map[command]
-        _switch_voice_generation(reason)
-        command_fn()
-
-        return {
-            "success": True,
-            "message": f"命令 {command} 已执行",
-            "state": orchestrator.get_state()
-        }
-    except Exception as e:
-        print(f"[AGENT COMMAND] Error: {e}")
-        return {"error": str(e)}
-
-@app.get("/api/agent/status")
-async def agent_status():
-    """获取 Agent 和导航系统状态"""
-    global orchestrator, yolomedia_running
-
-    return {
-        "agent_ready": _agent_instance is not None,
-        "navigation_state": orchestrator.get_state() if orchestrator else None,
-        "yolomedia_running": yolomedia_running,
-        "camera_connected": False  # 【ESP32 已禁用】
-        # "camera_connected": esp32_camera_ws is not None
-    }
+    register_runtime_routes(
+        app,
+        {
+            "runtime_mode": RUNTIME_MODE,
+            "active_video_source": ACTIVE_VIDEO_SOURCE,
+            "active_audio_source": ACTIVE_AUDIO_SOURCE,
+            "mobile_text_tts_only": MOBILE_TEXT_TTS_ONLY,
+        },
+    )
 
 
-@app.get("/api/runtime/config")
-async def runtime_config():
-    """返回当前运行模式与输入源配置，便于 Android 端自检。"""
-    return {
-        "runtime_mode": RUNTIME_MODE,
-        "active_video_source": ACTIVE_VIDEO_SOURCE,
-        "active_audio_source": ACTIVE_AUDIO_SOURCE,
-        "mobile_text_tts_only": MOBILE_TEXT_TTS_ONLY,
-    }
 
-
-# ---------- TTS 缓存管理 API 【已移除，使用本地 TTS 无需缓存】----------
-# 本地 TTS (pyttsx3) 不需要缓存管理，相关 API 已删除
+_register_split_api_routes()
 
 # ---------- 电脑摄像头 API ----------
 # 电脑摄像头相关全局变量
@@ -1027,175 +945,6 @@ async def capture_webcam_frame():
 
 # 注册 /stream.wav
 register_stream_route(app)
-
-# ---------- 视频测试页面 ----------
-@app.get("/video_test", response_class=HTMLResponse)
-def video_test_page():
-    """视频测试页面"""
-    with open(os.path.join("templates", "video_test.html"), "r", encoding="utf-8") as f:
-        return HTMLResponse(f.read())
-
-# ---------- 视频测试控制 API ----------
-from fastapi import UploadFile, File
-from video_test_recorder import get_test_recorder, create_test_recorder, destroy_test_recorder, VideoTestRecorder
-
-test_recorders: Dict[str, VideoTestRecorder] = {}
-
-# 创建测试结果目录
-os.makedirs("test_results", exist_ok=True)
-os.makedirs("test_results/temp", exist_ok=True)
-
-@app.post("/api/test/start")
-async def start_test(request: Request):
-    """开始测试"""
-    data = await request.json()
-    test_mode = data.get("mode")  # blindpath, crossing, trafficlight, itemsearch
-    video_name = data.get("video_name", "")
-
-    if not test_mode:
-        return {"error": "缺少测试模式"}
-
-    # 创建测试记录器
-    recorder = create_test_recorder(test_mode, save_original_frames=False)
-    test_id = recorder.test_id
-    test_recorders[test_id] = recorder
-
-    # 启动对应的导航模式
-    if orchestrator:
-        if test_mode == "blindpath":
-            _switch_voice_generation("test_start_blindpath")
-            orchestrator.start_blind_path_navigation()
-        elif test_mode == "crossing":
-            _switch_voice_generation("test_start_crossing")
-            orchestrator.start_crossing()
-        elif test_mode == "trafficlight":
-            _switch_voice_generation("test_start_trafficlight")
-            orchestrator.start_traffic_light_detection()
-        elif test_mode == "itemsearch":
-            _switch_voice_generation("test_start_itemsearch")
-            orchestrator.start_item_search()
-
-    recorder.start_recording(video_path=video_name)
-
-    return {
-        "success": True,
-        "test_id": test_id,
-        "message": f"开始 {test_mode} 测试"
-    }
-
-@app.post("/api/test/stop")
-async def stop_test(request: Request):
-    """停止测试"""
-    data = await request.json()
-    test_id = data.get("test_id")
-
-    recorder = test_recorders.get(test_id)
-    if not recorder:
-        return {"error": "测试不存在"}
-
-    # 停止记录
-    results = recorder.stop_recording()
-
-    # 停止导航
-    if orchestrator:
-        _switch_voice_generation("test_stop_navigation")
-        orchestrator.stop_navigation()
-
-    # 保存结果
-    output_dir = "test_results"
-    video_path = recorder.save_annotated_video(output_dir=output_dir)
-    log_path = recorder.save_test_log(output_dir=output_dir)
-    sync_log_path = recorder.save_sync_log(output_dir=output_dir)  # 新增：保存同步日志
-
-    return {
-        "success": True,
-        "results": results,
-        "annotated_video": video_path,
-        "test_log": log_path,
-        "sync_log": sync_log_path  # 新增：返回同步日志路径
-    }
-
-@app.get("/api/test/results/{test_id}")
-async def get_test_results(test_id: str):
-    """获取测试结果"""
-    recorder = test_recorders.get(test_id)
-    if not recorder:
-        return {"error": "测试不存在"}
-
-    return {
-        "test_id": test_id,
-        "summary": recorder.get_summary()
-    }
-
-@app.get("/api/test/sync_log/{test_id}")
-async def get_sync_log(test_id: str):
-    """获取音画同步日志"""
-    import os
-    sync_log_path = os.path.join("test_results", f"{test_id}_sync_log.json")
-
-    if not os.path.exists(sync_log_path):
-        return {"error": "同步日志不存在"}
-
-    try:
-        with open(sync_log_path, "r", encoding="utf-8") as f:
-            sync_data = json.load(f)
-        return sync_data
-    except Exception as e:
-        return {"error": f"读取同步日志失败: {e}"}
-    """获取测试结果"""
-    recorder = test_recorders.get(test_id)
-    if not recorder:
-        return {"error": "测试不存在"}
-
-    return {
-        "test_id": test_id,
-        "summary": recorder.get_summary()
-    }
-
-@app.get("/api/test/download/{test_id}")
-async def download_test_results(test_id: str):
-    """下载测试结果（打包所有文件）"""
-    import shutil
-    from fastapi.responses import FileResponse
-
-    recorder = test_recorders.get(test_id)
-    if not recorder:
-        return {"error": "测试不存在"}
-
-    # 创建临时打包目录
-    temp_dir = f"test_results/temp/{test_id}"
-    os.makedirs(temp_dir, exist_ok=True)
-
-    # 复制所有结果文件
-    output_dir = "test_results"
-    src_files = [
-        os.path.join(output_dir, f"{test_id}_annotated.mp4"),
-        os.path.join(output_dir, f"{test_id}_log.json")
-    ]
-
-    for src in src_files:
-        if os.path.exists(src):
-            shutil.copy2(src, temp_dir)
-
-    # 打包成zip
-    zip_path = os.path.join("test_results", f"{test_id}_results.zip")
-    shutil.make_archive(
-        base_name=os.path.join("test_results", test_id + "_results"),
-        format="zip",
-        root_dir=temp_dir
-    )
-
-    # 清理临时目录
-    shutil.rmtree(temp_dir, ignore_errors=True)
-
-    if os.path.exists(zip_path):
-        return FileResponse(
-            zip_path,
-            media_type="application/zip",
-            filename=f"{test_id}_results.zip"
-        )
-    else:
-        return {"error": "打包失败"}
 
 # ---------- WebSocket：WebUI 文本（ASR/AI 状态推送） ----------
 @app.websocket("/ws_ui")
