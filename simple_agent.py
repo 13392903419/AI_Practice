@@ -296,8 +296,8 @@ class ToolExecutor:
             qwen = get_local_qwen()
             response = await qwen.chat(
                 message=prompt,
-                max_tokens=100,
-                temperature=0.2
+                max_tokens=50,
+                temperature=0.1
             )
             return response.strip()
         except Exception as e:

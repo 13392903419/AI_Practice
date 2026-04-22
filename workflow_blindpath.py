@@ -71,6 +71,12 @@ _OBSTACLE_NAME_CN = {
 # 动态类别名称列表
 DYNAMIC_CLASS_NAMES = {'person', 'bicycle', 'car', 'motorcycle', 'bus', 'truck', 'animal', 'dog'}
 
+# 横向快速车流过滤参数（用于减少等待/通行时的语音干扰）
+LATERAL_FLOW_MIN_PX = float(os.getenv("BLINDPATH_LATERAL_FLOW_MIN_PX", "7.0"))
+LATERAL_FLOW_MIN_RATIO = float(os.getenv("BLINDPATH_LATERAL_FLOW_MIN_RATIO", "0.008"))
+LATERAL_FLOW_DOMINANCE = float(os.getenv("BLINDPATH_LATERAL_FLOW_DOMINANCE", "1.8"))
+LATERAL_FLOW_MIN_POINTS = int(os.getenv("BLINDPATH_LATERAL_FLOW_MIN_POINTS", "10"))
+
 @dataclass
 class ProcessingResult:
     """处理结果数据类"""
@@ -253,6 +259,8 @@ class BlindPathNavigator:
         self._obs_pending_image = None       # 待检测的图像（由主线程写入）
         self._obs_pending_mask = None        # 对应的 path_mask
         self._obs_thread_started = False
+        self._obs_prev_gray = None
+        self._obs_prev_obstacles = []
         
         # 掩码稳定化参数（已禁用光流外推，这些参数不再使用）
         self.MASK_STAB_MIN_AREA = int(os.getenv("AIGLASS_MASK_MIN_AREA", "1500"))
@@ -441,11 +449,32 @@ class BlindPathNavigator:
 
             try:
                 t0 = time.time()
+                prev_gray = self._obs_prev_gray
+                curr_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                prev_obstacles = self._obs_prev_obstacles
+
                 detected = self._detect_obstacles(img, mask)
+                if prev_gray is not None:
+                    detected = self._stabilize_obstacle_list(
+                        detected,
+                        prev_obstacles,
+                        prev_gray,
+                        curr_gray,
+                        img.shape[:2]
+                    )
+                detected = self._mark_lateral_fast_traffic(
+                    detected,
+                    prev_obstacles,
+                    prev_gray,
+                    curr_gray,
+                    img.shape[:2]
+                )
                 dt = (time.time() - t0) * 1000
                 # 原子更新结果
                 self.last_detected_obstacles = detected
                 self.last_obstacle_detection_time = time.time()
+                self._obs_prev_gray = curr_gray
+                self._obs_prev_obstacles = detected
                 logger.info(f"[OBS-THREAD] 检测完成: {len(detected)} 个障碍物, 耗时 {dt:.0f}ms")
             except Exception as e:
                 logger.error(f"[OBS-THREAD] 检测失败: {e}")
@@ -530,6 +559,8 @@ class BlindPathNavigator:
                         f"bottom_y_ratio={obs.get('bottom_y_ratio', 0):.2f}, "
                         f"area_ratio={obs.get('area_ratio', 0):.3f}, "
                         f"位置=({obs.get('center_x', 0):.0f}, {obs.get('center_y', 0):.0f})")
+            if obs.get('is_lateral_fast_traffic'):
+                continue
             self._add_obstacle_visualization(obs, frame_visualizations)
         
         crosswalk_active = False
@@ -861,10 +892,15 @@ class BlindPathNavigator:
         # 7. 生成标注图像
         annotated_image = None
 
+        base_image = image.copy()
+        for obs in detected_obstacles:
+            if obs.get('is_lateral_fast_traffic'):
+                self._apply_black_mask(base_image, obs.get('mask'))
+
         if frame_visualizations:
-            annotated_image = self._draw_visualizations(image.copy(), frame_visualizations)
+            annotated_image = self._draw_visualizations(base_image, frame_visualizations)
         else:
-            annotated_image = image.copy()
+            annotated_image = base_image
         
         # 添加底部指令按钮（显示当前实际播报的语音）
         current_instruction = final_guidance_text if final_guidance_text else "等待中..."
@@ -2081,7 +2117,9 @@ class BlindPathNavigator:
     
     def _check_and_set_obstacle_voice(self, obstacles, crosswalk_active: bool = False):
         """检查障碍物并设置待播报的语音"""
-        if not obstacles:
+        active_obstacles = [obs for obs in (obstacles or []) if not obs.get('suppress_obstacle_alert')]
+
+        if not active_obstacles:
             self.last_obstacle_speech = ""
             self.pending_obstacle_voice = None
             return
@@ -2089,11 +2127,11 @@ class BlindPathNavigator:
         if crosswalk_active:
             # 斑马线阶段不让普通障碍物抢占语音，只保留真正极近的碰撞预警。
             blocking_obstacles = []
-            near_obstacles = [obs for obs in obstacles if self._is_crosswalk_emergency_obstacle(obs)]
+            near_obstacles = [obs for obs in active_obstacles if self._is_crosswalk_emergency_obstacle(obs)]
             obstacle_mode = 'crosswalk_emergency'
         else:
-            blocking_obstacles = [obs for obs in obstacles if self._is_blocking_blind_path(obs)]
-            near_obstacles = [obs for obs in obstacles if self._is_near_obstacle(obs)]
+            blocking_obstacles = [obs for obs in active_obstacles if self._is_blocking_blind_path(obs)]
+            near_obstacles = [obs for obs in active_obstacles if self._is_near_obstacle(obs)]
             obstacle_mode = 'blindpath_block' if blocking_obstacles else 'near'
 
         is_blind_path_blocked = bool(blocking_obstacles)
@@ -2331,6 +2369,9 @@ class BlindPathNavigator:
     def _add_obstacle_visualization(self, obstacle, visualizations, pulse_effect=False):
         """添加障碍物可视化（简化版：仅边框，近红远黄）"""
         try:
+            if obstacle.get('is_lateral_fast_traffic'):
+                return
+
             # 计算障碍物危险等级
             bottom_y_ratio = obstacle.get('bottom_y_ratio', 0)
             area_ratio = obstacle.get('area_ratio', 0)
@@ -3326,6 +3367,108 @@ class BlindPathNavigator:
             stabilized.append(curr_obs)
         
         return stabilized
+
+    @staticmethod
+    def _is_vehicle_obstacle(obstacle: Dict[str, Any]) -> bool:
+        """仅车辆类目标参与横向快速车流判定。"""
+        name = str(obstacle.get('name') or obstacle.get('label') or '').strip().lower()
+        vehicle_keywords = {
+            'car', 'bus', 'truck', 'motorcycle', 'bicycle', 'scooter',
+            'van', 'taxi', 'minibus', 'pickup', 'vehicle', 'auto', 'sedan'
+        }
+        return name in vehicle_keywords
+
+    def _estimate_mask_flow_vector(self, prev_gray, curr_gray, prev_mask):
+        """在上一帧目标mask区域估计主光流向量。"""
+        if prev_gray is None or curr_gray is None or prev_mask is None:
+            return 0.0, 0.0, 0
+
+        try:
+            mask_u8 = ((prev_mask > 0).astype(np.uint8) * 255)
+            edge_mask = self._get_edge_mask(mask_u8, offset=6)
+            p0 = cv2.goodFeaturesToTrack(prev_gray, mask=edge_mask, **self.feature_params)
+            if p0 is None or len(p0) < LATERAL_FLOW_MIN_POINTS:
+                return 0.0, 0.0, 0
+
+            p1, st, _ = cv2.calcOpticalFlowPyrLK(prev_gray, curr_gray, p0, None, **self.lk_params)
+            if p1 is None or st is None:
+                return 0.0, 0.0, 0
+
+            good_new = p1[st == 1]
+            good_old = p0[st == 1]
+            if good_new is None or good_old is None or len(good_new) < LATERAL_FLOW_MIN_POINTS:
+                return 0.0, 0.0, 0
+
+            flow = good_new - good_old
+            dx = float(np.median(flow[:, 0]))
+            dy = float(np.median(flow[:, 1]))
+            return dx, dy, int(len(flow))
+        except Exception:
+            return 0.0, 0.0, 0
+
+    def _mark_lateral_fast_traffic(self, obstacles, prev_obstacles, prev_gray, curr_gray, image_shape):
+        """标记横向快速车流：抑制语音并用于画面mask。"""
+        if not obstacles:
+            return []
+
+        _, w = image_shape
+        lateral_thresh = max(LATERAL_FLOW_MIN_PX, w * LATERAL_FLOW_MIN_RATIO)
+
+        for obs in obstacles:
+            obs['is_lateral_fast_traffic'] = False
+            obs['suppress_obstacle_alert'] = False
+
+            if not self._is_vehicle_obstacle(obs):
+                continue
+            if prev_gray is None or curr_gray is None or not prev_obstacles:
+                continue
+            if 'mask' not in obs or obs['mask'] is None:
+                continue
+
+            best_prev = None
+            best_iou = 0.0
+            curr_mask = obs['mask']
+            for prev_obs in prev_obstacles:
+                prev_mask = prev_obs.get('mask')
+                if prev_mask is None:
+                    continue
+                inter = np.logical_and(curr_mask > 0, prev_mask > 0).sum()
+                union = np.logical_or(curr_mask > 0, prev_mask > 0).sum()
+                iou = float(inter) / float(union) if union > 0 else 0.0
+                if iou > best_iou:
+                    best_iou = iou
+                    best_prev = prev_obs
+
+            if best_prev is None or best_iou < 0.1:
+                continue
+
+            dx, dy, flow_points = self._estimate_mask_flow_vector(
+                prev_gray,
+                curr_gray,
+                best_prev.get('mask')
+            )
+
+            obs['flow_dx'] = dx
+            obs['flow_dy'] = dy
+            obs['flow_points'] = flow_points
+
+            is_lateral_fast = (
+                flow_points >= LATERAL_FLOW_MIN_POINTS
+                and abs(dx) >= lateral_thresh
+                and abs(dx) >= LATERAL_FLOW_DOMINANCE * (abs(dy) + 1e-3)
+            )
+            if is_lateral_fast:
+                obs['is_lateral_fast_traffic'] = True
+                obs['suppress_obstacle_alert'] = True
+
+        return obstacles
+
+    @staticmethod
+    def _apply_black_mask(image: np.ndarray, mask: Optional[np.ndarray]):
+        """将目标区域涂黑，用于屏蔽横向快速车流。"""
+        if image is None or mask is None:
+            return
+        image[mask > 0] = 0
   
     def _speech_for_obstacle(self, name: str) -> str:
         k = (name or '').strip().lower()
