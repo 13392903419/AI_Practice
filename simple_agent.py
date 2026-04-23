@@ -181,7 +181,7 @@ class ToolExecutor:
         if action == "start":
             # 使用 NavigationMaster 的方法启动盲道导航
             self.nav_master.start_blind_path_navigation()
-            return "已启动盲道导航模式。请保持直行，我会引导您沿盲道行走。"
+            return "已启动盲道导航模式。"
         elif action == "stop":
             self.nav_master.stop_navigation()
             return "已停止导航。"
@@ -197,11 +197,11 @@ class ToolExecutor:
 
         if action == "start":
             self.nav_master.start_crossing()
-            return "准备过马路，正在帮您寻找斑马线..."
+            return "准备过马路, 正在帮您寻找斑马线"
         elif action == "stop":
             # 停止过马路，切回盲道导航
             self.nav_master.start_blind_path_navigation()
-            return "已结束过马路模式，恢复盲道导航。"
+            return ""
         else:
             return "过马路: 未知指令"
 
@@ -252,7 +252,7 @@ class ToolExecutor:
 
         if action == "start":
             self.nav_master.start_traffic_light_detection()
-            return "正在检测红绿灯状态..."
+            return "正在检测红绿灯状态"
         elif action == "stop":
             self.nav_master.stop_navigation()
             return "已停止红绿灯检测。"
@@ -267,7 +267,7 @@ class ToolExecutor:
             except Exception:
                 pass
         self.nav_master.stop_item_search(restore_nav=True)
-        return "已结束物品查找，恢复导航模式。"
+        return "已结束物品查找，恢复导航模式"
 
     async def _tool_save_route(self, params: Dict[str, Any]) -> str:
         """记录路线工具 - 只保存，不回复"""
@@ -291,12 +291,12 @@ class ToolExecutor:
 
 用户问题: {query}
 
-请给出简短回答（不超过50字）。"""
+请给出简短回答（不超过20字）。"""
 
             qwen = get_local_qwen()
             response = await qwen.chat(
                 message=prompt,
-                max_tokens=50,
+                max_tokens=20,
                 temperature=0.1
             )
             return response.strip()

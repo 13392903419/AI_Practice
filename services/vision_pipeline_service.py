@@ -131,7 +131,16 @@ def yolo_worker_loop(state, deps):
                 res = orchestrator.process_frame(f)
                 out = res.annotated_image if res.annotated_image is not None else f
                 if res.guidance_text:
-                    deps["play_voice_text"](res.guidance_text, generation_id=frame_generation, source="navigation_loop")
+                    # 关键通行指令提高优先级，避免被同窗口的普通导航语音压制
+                    nav_priority = None
+                    if res.guidance_text in ("绿灯稳定，开始通行。", "开始通行"):
+                        nav_priority = 120
+                    deps["play_voice_text"](
+                        res.guidance_text,
+                        generation_id=frame_generation,
+                        priority=nav_priority,
+                        source="navigation_loop"
+                    )
                 return out, res.guidance_text
 
             result_frame, _ = processor.process_frame_optimized(frame, current_state, process_func, source=frame_source)

@@ -233,7 +233,7 @@ class BlindPathNavigator:
         
         # 阈值设置
         self.CLASS_CONF_THRESHOLDS = {
-            1: 0.30,  # blind_path
+            1: 0.40,  # blind_path
             0: 0.30   # crosswalk
         }
         
@@ -2433,11 +2433,11 @@ class BlindPathNavigator:
 
         # 只识别到小片段时给“靠近”引导，避免与常规导航产生冲突。
         if center_x_ratio < 0.42:
-            guidance_text = "检测到左前方盲道"
+            guidance_text = "左前方有盲道"
         elif center_x_ratio > 0.58:
-            guidance_text = "检测到右前方盲道"
+            guidance_text = "右前方有盲道"
         else:
-            guidance_text = "检测到前方盲道"
+            guidance_text = "前方有盲道"
 
         self._add_data_panel(frame_visualizations, {
             "状态": "远距靠近",
@@ -2731,14 +2731,14 @@ class BlindPathNavigator:
                 "filled": True
             })
             
-            # 进度填充（0-100%，但最多显示到arrival阈值0.25对应100%）
-            progress = min(viz_data['area_ratio'] / 0.25, 1.0)
+            # 进度填充（面积达到15%时显示100%）
+            progress = min(viz_data['area_ratio'] / 0.15, 1.0)
             fill_width = int(bar_width * progress)
             
             # 根据阶段选择颜色
             if viz_data['in_arrival']:
                 fill_color = "rgba(0, 255, 100, 0.8)"  # 绿色（可过马路）
-            elif viz_data['area_ratio'] >= 0.18:
+            elif viz_data['area_ratio'] >= 0.15:
                 fill_color = "rgba(255, 200, 0, 0.8)"  # 黄色（接近）
             elif viz_data['area_ratio'] >= 0.08:
                 fill_color = "rgba(0, 200, 255, 0.8)"  # 青色（靠近）

@@ -21,8 +21,8 @@ class CrosswalkAwarenessMonitor:
         self.THRESHOLDS = {
             'discover': 0.01,      # 1% - 发现
             'approaching': 0.08,   # 8% - 靠近
-            'near': 0.15,          # 15% - 很近
-            'arrival': 0.18,       # 18% - 到达（可以过马路）
+            'near': 0.12,          # 12% - 很近
+            'arrival': 0.15,       # 15% - 到达（可以过马路）【已降低，更容易触发】
         }
         
         # 已播报的阈值（避免重复）
@@ -148,7 +148,7 @@ class CrosswalkAwarenessMonitor:
                     'position': position_desc
                 }
         
-        # 阶段2：靠近阶段（0.08-0.18）
+        # 阶段2：靠近阶段（0.08-0.12）
         elif area_ratio >= self.THRESHOLDS['approaching'] and area_ratio < self.THRESHOLDS['near']:
             # 首次播报
             if self.THRESHOLDS['approaching'] not in self.broadcasted_thresholds:
@@ -175,7 +175,7 @@ class CrosswalkAwarenessMonitor:
                     'position': position_desc
                 }
         
-        # 阶段3：很近阶段（0.18-0.25）
+        # 阶段3：很近阶段（0.12-0.15）
         elif area_ratio >= self.THRESHOLDS['near'] and area_ratio < self.THRESHOLDS['arrival']:
             # 首次播报
             if self.THRESHOLDS['near'] not in self.broadcasted_thresholds:
@@ -202,7 +202,7 @@ class CrosswalkAwarenessMonitor:
                     'position': position_desc
                 }
         
-        # 阶段4：到达阶段（area ≥ 0.25，无遮挡）
+        # 阶段4：到达阶段（area ≥ 0.15，无遮挡）
         elif area_ratio >= self.THRESHOLDS['arrival']:
             # 必须无遮挡才能提示过马路
             if has_occlusion:
@@ -239,8 +239,8 @@ class CrosswalkAwarenessMonitor:
                 self.in_arrival_state = False
                 return None
         
-        # 降级处理：如果从到达状态面积减小
-        if self.in_arrival_state and area_ratio < 0.20:
+        # 降级处理：如果从到达状态回落到很近阶段以下
+        if self.in_arrival_state and area_ratio < self.THRESHOLDS['near']:
             logger.info(f"[斑马线] 面积降至{area_ratio:.2f}，退出到达状态")
             self.in_arrival_state = False
             # 清除部分已播报标记，允许重新播报

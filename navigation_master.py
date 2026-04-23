@@ -540,15 +540,7 @@ class NavigationMaster:
                     self.cooldown_until = now + self.COOLDOWN_SEC
                     say = "方向正确，请继续前进。"
 
-                # 【移除】所有可视化干扰
-                # _draw_badge(ann, f"STATE: {self.state}", (10, 28), fg="white", bg="green")
-                # _draw_state_panel(ann, {
-                #     "盲道状态": blind_state,
-                #     "回归计数": self.cnt_cross_end
-                # }, pos=(10, 60))
-                # _draw_progress_bar(ann, max(0.0, min(1.0, self.cnt_cross_end / max(1, self.FRAMES_NEXT_BLIND_OK))), pos=(10, 120), size=(200, 10), color="green")
-                # _draw_frame_border(ann, color=_color_bgr("green"), thickness=3)
-
+               
             # —— 恢复态：一旦盲道恢复可用则回盲道
             elif self.state == RECOVERY:
                 if blind_state in ("ONBOARDING", "NAVIGATING"):
@@ -557,14 +549,7 @@ class NavigationMaster:
                     say = ""
                 else:
                     say = ""
-                # 【移除】所有可视化干扰
-                # _draw_badge(ann, f"STATE: {self.state}", (10, 28), fg="white", bg="red")
-                # _draw_state_panel(ann, {
-                #     "提示": "请缓慢环顾/抬头/降低手机角度",
-                #     "丢失计数": self.cnt_lost
-                # }, pos=(10, 60))
-                # _draw_frame_border(ann, color=_color_bgr("red"), thickness=3)
-
+                
             # 丢失计数（兜底）
             if blind_state == "UNKNOWN" and cross_stage == "not_detected":
                 self.cnt_lost += 1
@@ -576,12 +561,7 @@ class NavigationMaster:
                 self.cooldown_until = now + self.COOLDOWN_SEC
                 say = "环境复杂，进入恢复模式。"
 
-            # 【移除】冷却进度条
-            # if in_cooldown:
-            #     remain = max(0.0, self.cooldown_until - now)
-            #     ratio = 1.0 - min(1.0, remain / self.COOLDOWN_SEC)
-            #     _draw_progress_bar(ann, ratio, pos=(10, 140), size=(160, 8), color="gray")
-
+            
             return OrchestratorResult(ann, self._say(now, say), self.state, {"source": "blind", "cross_stage": cross_stage, "blind_state": blind_state})
 
         if self.state == WAIT_TRAFFIC_LIGHT:
@@ -592,15 +572,7 @@ class NavigationMaster:
             major = self.tl_major.majority()
             self.tl_last_color = major
 
-            # 【移除】所有可视化干扰
-            # _draw_badge(ann, f"STATE: {self.state}", (10, 28), fg="white", bg="magenta")
-            # self._draw_tl_status(ann, major, meta)
-            # _draw_state_panel(ann, {
-            #     "提示": "请等待绿灯或语音确认"立即通过"",
-            #     "冷却": f"{max(0.0, self.cooldown_until - now):.1f}s"
-            # }, pos=(10, 80))
-            # _draw_frame_border(ann, color=_color_bgr("magenta"), thickness=3)
-
+            
             say = ""
             if major == "green" and not in_cooldown:
                 self.state = CROSSING
@@ -615,13 +587,6 @@ class NavigationMaster:
                     self._last_wait_light_announce = now
 
 
-
-            # 【移除】冷却进度
-            # if in_cooldown:
-            #     remain = max(0.0, self.cooldown_until - now)
-            #     ratio = 1.0 - min(1.0, remain / self.COOLDOWN_SEC)
-            #     _draw_progress_bar(ann, ratio, pos=(10, 140), size=(160, 8), color="gray")
-
             return OrchestratorResult(ann, self._say(now, say), self.state, {"traffic_light": major})
 
         if self.state == CROSSING:
@@ -631,9 +596,6 @@ class NavigationMaster:
                 # 异常 → 恢复
                 self.state = RECOVERY
                 ann_err = bgr.copy()
-                # 【移除】所有可视化干扰
-                # _draw_badge(ann_err, "CROSS ERROR", (10, 28), fg="white", bg="red")
-                # _put_text(ann_err, str(e), (10, 56), color=(255,255,255), scale=0.55)
                 return OrchestratorResult(ann_err, self._say(now, ""), self.state, {"error": str(e)})
 
             ann = cres.annotated_image if cres.annotated_image is not None else bgr.copy()
@@ -675,26 +637,11 @@ class NavigationMaster:
                 self.cooldown_until = now + self.COOLDOWN_SEC
                 say = "过马路结束，准备上人行道。"
 
-            # 【移除】所有可视化干扰
-            # _draw_badge(ann, f"STATE: {self.state}", (10, 28), fg="white", bg="cyan")
-            # _draw_state_panel(ann, {
-            #     "结束计数": self.cnt_cross_end,
-            #     "冷却": f"{max(0.0, self.cooldown_until - now):.1f}s"
-            # }, pos=(10, 60))
-            # _draw_progress_bar(ann, max(0.0, min(1.0, self.cnt_cross_end / max(1, self.FRAMES_CROSS_END))), pos=(10, 120), size=(220, 10), color="cyan")
-            # _draw_frame_border(ann, color=_color_bgr("cyan"), thickness=3)
-            # if in_cooldown:
-            #     remain = max(0.0, self.cooldown_until - now)
-            #     ratio = 1.0 - min(1.0, remain / self.COOLDOWN_SEC)
-            #     _draw_progress_bar(ann, ratio, pos=(10, 140), size=(160, 8), color="gray")
-
+            
             return OrchestratorResult(ann, self._say(now, say), self.state, {"source": "cross", "end_cnt": self.cnt_cross_end})
 
         # 兜底
         ann = bgr.copy()
-        # 【移除】所有可视化干扰
-        # _draw_badge(ann, f"STATE: {self.state}", (10, 28), fg="white", bg="gray")
-        # _draw_frame_border(ann, color=_color_bgr("gray"), thickness=2)
         return OrchestratorResult(ann, "", self.state, {})
 
 

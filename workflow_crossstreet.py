@@ -1845,8 +1845,8 @@ class CrossStreetNavigator:
                         "position": (w - 180, 20)
                     })
                     
-                    # 连续超过10秒没有斑马线，才播报"过马路结束"
-                    if no_crosswalk_duration > 10.0:
+                    # 连续超过5秒没有斑马线，才播报"过马路结束"
+                    if no_crosswalk_duration > 5.0:
                         if not self.crossing_end_announced:
                             if current_time - self.last_guide_time > self.guide_interval:
                                 # 优先级1：红绿灯警告
@@ -1858,9 +1858,9 @@ class CrossStreetNavigator:
                                     guidance_text = "过马路结束，准备上人行道。"
                                     self.crossing_end_announced = True
                                     self.last_guide_time = current_time
-                        # 播报结束后，检测到盲道则重复播报（节流4秒）
+                        # 播报结束后，检测到盲道则重复播报（节流3秒）
                         elif blindpath_mask is not None:
-                            if current_time - self.last_blindpath_announce_time > 4.0:
+                            if current_time - self.last_blindpath_announce_time > 3.0:
                                 guidance_text = "远处有盲道，继续前行。"
                                 self.last_blindpath_announce_time = current_time
                                 self.last_guide_time = current_time
