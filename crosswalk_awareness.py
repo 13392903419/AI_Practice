@@ -228,7 +228,7 @@ class CrosswalkAwarenessMonitor:
                 self.last_broadcast_time = current_time
                 return {
                     'voice_text': "斑马线到了可以过马路",
-                    'priority': 80,
+                    'priority': 100,
                     'should_broadcast': True,
                     'area': area_ratio,
                     'position': '到达'

@@ -246,9 +246,14 @@ def _audio_worker():
                 priority_data = await asyncio.get_event_loop().run_in_executor(None, _audio_queue.get, True)
                 if priority_data is None:
                     break
-                # 解包优先级和实际音频数据
-                if isinstance(priority_data, tuple) and len(priority_data) == 2:
-                    _, audio_data = priority_data
+                # 解包优先级和实际音频数据（兼容 2 元组 / 3 元组）
+                if isinstance(priority_data, tuple):
+                    if len(priority_data) == 3:
+                        _, audio_data, _is_critical = priority_data
+                    elif len(priority_data) == 2:
+                        _, audio_data = priority_data
+                    else:
+                        audio_data = priority_data
                 else:
                     audio_data = priority_data
                 await _broadcast_audio_optimized(audio_data)
@@ -378,30 +383,56 @@ def initialize_audio_system():
     
     print("[AUDIO] 音频系统初始化完成（预加载+工作线程）")
 
-def play_audio_threadsafe(audio_key):
-    """线程安全的音频播放函数"""
+def _drain_queue_preserve_critical():
+    """清空队列，但保留 critical 项；返回是否发生过清理。"""
+    global _audio_queue
+    preserved = []
+    try:
+        while True:
+            item = _audio_queue.get_nowait()
+            if isinstance(item, tuple) and len(item) == 3 and item[2]:
+                preserved.append(item)
+    except queue.Empty:
+        pass
+    new_q = queue.PriorityQueue(maxsize=10)
+    for it in preserved:
+        try:
+            new_q.put_nowait(it)
+        except queue.Full:
+            break
+    _audio_queue = new_q
+    return preserved
+
+
+def play_audio_threadsafe(audio_key, critical: bool = False):
+    """线程安全的音频播放函数
+
+    critical=True 表示关键通行语音（如"绿灯稳定，开始通行"）：
+    - 入队时不触发"实时清空"策略
+    - 后续普通语音触发的清空不会把它清掉
+    """
     global _audio_queue, _audio_priority
-    
+
     if not _initialized:
         initialize_audio_system()
-    
+
     if audio_key not in AUDIO_MAP:
         print(f"[AUDIO] 未知的音频键: {audio_key}")
         return
-    
+
     filepath = AUDIO_MAP[audio_key]
     pcm_data = _audio_cache.get(filepath)
     if pcm_data is None:
         print(f"[AUDIO] 音频未在缓存中: {audio_key}")
         return
-    
+
     # 如果是压缩的数据，先解压
     if pcm_data and len(pcm_data) > 5 and pcm_data[0] in [0x01, 0x02]:
         pcm_data = compressed_audio_cache.decompress(pcm_data)
         if not pcm_data:
             print(f"[AUDIO] 解压失败: {audio_key}")
             return
-    
+
     # 【优化】实时播报策略：保持队列最小化，避免积压延迟
     with _queue_lock:
         queue_size = _audio_queue.qsize()
@@ -410,24 +441,35 @@ def play_audio_threadsafe(audio_key):
         with _playing_lock:
             currently_playing = _is_playing
 
-        # 实时策略：只允许1个积压，超过立即清空
-        if queue_size > 0 and not currently_playing:
-            # 未播放时立即清空，播放最新语音
-            print(f"[AUDIO] 清空队列（当前{queue_size}个），播放最新语音")
-            _audio_queue = queue.PriorityQueue(maxsize=10)
-            queue_size = 0
-        elif queue_size > 1 and currently_playing:
-            # 正在播放时，如果积压>1个则清空（保持实时性）
-            print(f"[AUDIO] 队列积压({queue_size}个)，清空以保持实时")
-            _audio_queue = queue.PriorityQueue(maxsize=10)
-            queue_size = 0
+        if critical:
+            # 关键语音：不清空队列，直接入队（保护既有项）
+            pass
+        else:
+            # 实时策略：只允许1个积压，超过立即清空（但保留 critical 项）
+            if queue_size > 0 and not currently_playing:
+                # 未播放时立即清空，播放最新语音
+                preserved = _drain_queue_preserve_critical()
+                if preserved:
+                    print(f"[AUDIO] 清空队列（保留{len(preserved)}个关键语音），播放最新语音")
+                else:
+                    print(f"[AUDIO] 清空队列（当前{queue_size}个），播放最新语音")
+                queue_size = _audio_queue.qsize()
+            elif queue_size > 1 and currently_playing:
+                # 正在播放时，如果积压>1个则清空（保持实时性；保留 critical 项）
+                preserved = _drain_queue_preserve_critical()
+                if preserved:
+                    print(f"[AUDIO] 队列积压({queue_size}个)，清空（保留{len(preserved)}个关键语音）")
+                else:
+                    print(f"[AUDIO] 队列积压({queue_size}个)，清空以保持实时")
+                queue_size = _audio_queue.qsize()
 
         try:
             # 使用优先级队列，确保音频按顺序播放
             _audio_priority += 1
-            _audio_queue.put_nowait((_audio_priority, pcm_data))
+            _audio_queue.put_nowait((_audio_priority, pcm_data, bool(critical)))
             if queue_size >= 1:
-                print(f"[AUDIO] 播放队列当前大小: {queue_size + 1}")
+                tag = "[关键]" if critical else ""
+                print(f"[AUDIO]{tag} 播放队列当前大小: {queue_size + 1}")
         except queue.Full:
             # 播放队列满则丢弃，保持实时性
             print(f"[AUDIO] 队列满，丢弃: {audio_key}")
@@ -446,6 +488,13 @@ VOICE_PRIORITY = {
     'direction': 50,     # 转向/平移 - 中等优先级  
     'straight': 10,      # 保持直行 - 最低优先级
     'other': 30          # 其他 - 默认优先级
+}
+
+# 关键通行语音：必须确保播出，入队不会触发清空，清队列也会被保留
+CRITICAL_VOICE_TEXTS = {
+    "绿灯稳定，开始通行。",
+    "开始通行",
+    "绿灯快没了",
 }
 
 
@@ -467,7 +516,9 @@ def bump_voice_generation(reason: str = "") -> int:
         new_gen = _voice_generation
 
     with _queue_lock:
-        _audio_queue = queue.PriorityQueue(maxsize=10)
+        preserved = _drain_queue_preserve_critical()
+        if preserved:
+            print(f"[AUDIO][GEN] bump 清队列，保留 {len(preserved)} 个关键语音")
 
     with _voice_arbiter_lock:
         _last_voice_time = 0.0
@@ -539,8 +590,18 @@ def play_voice_text(text: str, generation_id=None, priority: int = None, source:
         initialize_audio_system()
 
     resolved_priority = int(priority) if priority is not None else _infer_priority(text)
-    if not _arbiter_allow(text, resolved_priority):
+    # 关键通行语音：标记为 critical（入队不清空、不被清掉），并绕过同文案冷却
+    is_critical = (text.strip() in CRITICAL_VOICE_TEXTS) or resolved_priority >= 100
+    if not is_critical and not _arbiter_allow(text, resolved_priority):
         return
+    if is_critical:
+        # critical 语音直接更新 arbiter 状态，避免紧跟着的低优先级把它"抢占"
+        global _last_voice_time, _last_voice_text, _last_voice_priority
+        now = time.time()
+        with _voice_arbiter_lock:
+            _last_voice_time = now
+            _last_voice_text = text
+            _last_voice_priority = max(resolved_priority, 120)
 
     candidates = []
     t = text.strip()
@@ -557,23 +618,23 @@ def play_voice_text(text: str, generation_id=None, priority: int = None, source:
     # 逐一尝试匹配
     for ck in candidates:
         if ck in AUDIO_MAP:
-            play_audio_threadsafe(ck)
+            play_audio_threadsafe(ck, critical=is_critical)
             return
 
     # 针对“前方有…注意避让”降级
     if ("前方有" in t) and ("注意避让" in t):
         fallback = "前方有障碍物，注意避让。"
         if fallback in AUDIO_MAP:
-            play_audio_threadsafe(fallback)
+            play_audio_threadsafe(fallback, critical=is_critical)
             return
 
     # 针对”请向…平移/微调/转动”类词条，常见变体尝试
     base = t.rstrip(".！？")
     if base in AUDIO_MAP:
-        play_audio_threadsafe(base)
+        play_audio_threadsafe(base, critical=is_critical)
         return
     if base + "." in AUDIO_MAP:
-        play_audio_threadsafe(base +".")
+        play_audio_threadsafe(base +".", critical=is_critical)
         return
 
     # 【新增】TTS 合成：对于未知的语音，使用 TTS 合成

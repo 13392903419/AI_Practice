@@ -61,6 +61,11 @@ CROSSWALK_NEAR_AREA_RATIO = 0.30  # 斑马线占画面30%认为"很近"（提高
 CROSSWALK_NEAR_BOTTOM_RATIO = 0.80  # 斑马线底部超过画面80%认为"很近"（提高）
 CROSSWALK_NEAR_MIN_HEIGHT_RATIO = 0.35  # 斑马线高度占画面35%以上（新增条件）
 
+# 过马路中"是否仍在斑马线上"的面积阈值
+# 面积 >= 此阈值：认为还在斑马线上，提示向前
+# 面积 <  此阈值：认为偏离了斑马线，根据斑马线在画面的左/右来提示平移
+CROSSING_ON_AREA_RATIO = float(os.getenv('CROSSING_ON_AREA_RATIO', '0.08'))
+
 # 红绿灯判定参数
 GREEN_LIGHT_STABLE_FRAMES = 5  # 绿灯稳定帧数
 
@@ -1769,13 +1774,19 @@ class CrossStreetNavigator:
                             # 兜底：若计算异常，保持原 offset（默认为0）
                             pass
 
-                    # 导航方向（基础）
-                    if abs(angle_deg) >= ANGLE_THRESH_DEG:
-                        direction = "左转一点" if angle_deg > 0 else "右转一点"
-                    elif abs(offset) >= OFFSET_THRESH:
-                        direction = "向右平移" if offset > 0 else "向左平移"
-                    else:
+                    # 导航方向（简化版：不再时刻对中，只要人还在斑马线上即可）
+                    # - 面积 >= 阈值：仍在斑马线上，提示向前
+                    # - 面积  < 阈值：偏离斑马线，根据斑马线中心在画面的位置提示平移
+                    if area_ratio >= CROSSING_ON_AREA_RATIO:
                         direction = "保持直行"
+                    else:
+                        ys_cw, xs_cw = np.where(crosswalk_mask > 0)
+                        if xs_cw.size > 0:
+                            cw_center_x_ratio = float(xs_cw.mean()) / float(w)
+                            # 斑马线偏左 → 用户偏右了 → 向左平移回来；反之同理
+                            direction = "向左平移" if cw_center_x_ratio < 0.5 else "向右平移"
+                        else:
+                            direction = "保持直行"
 
                     # 障碍物引导优先级（近距离优先覆盖方向提示）
                     obstacle_override = None
