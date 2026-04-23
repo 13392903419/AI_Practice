@@ -21,8 +21,8 @@ class CrosswalkAwarenessMonitor:
         self.THRESHOLDS = {
             'discover': 0.01,      # 1% - 发现
             'approaching': 0.08,   # 8% - 靠近
-            'near': 0.18,          # 18% - 很近
-            'arrival': 0.25,       # 25% - 到达（可以过马路）
+            'near': 0.15,          # 15% - 很近
+            'arrival': 0.18,       # 18% - 到达（可以过马路）
         }
         
         # 已播报的阈值（避免重复）

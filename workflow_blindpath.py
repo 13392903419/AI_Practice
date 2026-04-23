@@ -76,6 +76,10 @@ LATERAL_FLOW_MIN_PX = float(os.getenv("BLINDPATH_LATERAL_FLOW_MIN_PX", "7.0"))
 LATERAL_FLOW_MIN_RATIO = float(os.getenv("BLINDPATH_LATERAL_FLOW_MIN_RATIO", "0.008"))
 LATERAL_FLOW_DOMINANCE = float(os.getenv("BLINDPATH_LATERAL_FLOW_DOMINANCE", "1.8"))
 LATERAL_FLOW_MIN_POINTS = int(os.getenv("BLINDPATH_LATERAL_FLOW_MIN_POINTS", "10"))
+LATERAL_FLOW_MAX_DY_PX = float(os.getenv("BLINDPATH_LATERAL_FLOW_MAX_DY_PX", "5.0"))
+LATERAL_FLOW_MAX_DY_RATIO = float(os.getenv("BLINDPATH_LATERAL_FLOW_MAX_DY_RATIO", "0.006"))
+LATERAL_APPROACH_AREA_GROWTH = float(os.getenv("BLINDPATH_LATERAL_APPROACH_AREA_GROWTH", "0.015"))
+LATERAL_APPROACH_BOTTOM_GROWTH = float(os.getenv("BLINDPATH_LATERAL_APPROACH_BOTTOM_GROWTH", "0.03"))
 
 @dataclass
 class ProcessingResult:
@@ -103,7 +107,8 @@ class BlindPathNavigator:
         self.obstacle_detector = obstacle_detector
         
         # 状态变量
-        self.current_state = STATE_ONBOARDING
+        # 默认直接进入常规导航，低置信度时再回退上盲道
+        self.current_state = STATE_NAVIGATING
         self.onboarding_step = ONBOARDING_STEP_ROTATION
         self.maneuver_step = MANEUVER_STEP_1_ISSUE_COMMAND
         self.maneuver_target_info = None
@@ -242,6 +247,17 @@ class BlindPathNavigator:
         self.NAV_ORIENTATION_THRESHOLD_RAD = np.deg2rad(30)
         self.NAV_CENTER_OFFSET_THRESHOLD_RATIO = 0.20
         self.CURVATURE_PROXY_THRESHOLD = 1e-3
+        # 近场优先门控：近场偏移超阈值时，先做左右平移，暂时屏蔽转向判断
+        self.NAV_NEAR_Y_RATIO = float(os.getenv("AIGLASS_NAV_NEAR_Y_RATIO", "0.80"))
+        self.NAV_NEAR_CENTER_OFFSET_THRESHOLD_RATIO = float(
+            os.getenv("AIGLASS_NAV_NEAR_CENTER_OFFSET_THRESHOLD_RATIO", "0.10")
+        )
+        self.ACQUIRE_MIN_AREA_RATIO = float(os.getenv("AIGLASS_ACQUIRE_MIN_AREA_RATIO", "0.0008"))
+
+        # 常规导航低置信度回退：连续低置信帧达到阈值后，回退到上盲道重对齐
+        self.nav_fallback_frames = int(os.getenv("AIGLASS_NAV_FALLBACK_FRAMES", "100"))
+        self.nav_min_area_ratio = float(os.getenv("AIGLASS_NAV_MIN_AREA_RATIO", "0.003"))
+        self.nav_low_conf_streak = 0
         
         # 斑马线切换阈值
         self.CROSSWALK_SWITCH_AREA_RATIO = 0.22
@@ -293,6 +309,11 @@ class BlindPathNavigator:
         self.crosswalk_monitor = CrosswalkAwarenessMonitor()
         logger.info("[BlindPath] 斑马线感知监控器已初始化")
         logger.info(f"[BlindPath] 盲道检测间隔: 每{self.BLINDPATH_DETECTION_INTERVAL}帧")
+        logger.info(
+            f"[BlindPath] 默认状态=常规导航, 低置信回退阈值={self.nav_fallback_frames}帧, "
+            f"最小盲道面积占比={self.nav_min_area_ratio:.4f}"
+        )
+        logger.info(f"[BlindPath] 远距靠近引导最小面积占比={self.ACQUIRE_MIN_AREA_RATIO:.4f}")
     
     def init_traffic_light_detector(self):
         """初始化红绿灯检测器"""
@@ -529,6 +550,28 @@ class BlindPathNavigator:
         _pf_t1 = time.time()
         blind_path_mask, crosswalk_mask = self._detect_path_and_crosswalk(image)
         _pf_t2 = time.time()
+
+        # 默认常规导航：当盲道置信度持续偏低时，自动回退到上盲道重对齐
+        blind_area_ratio = 0.0
+        if blind_path_mask is not None and blind_path_mask.size > 0:
+            blind_area_ratio = float(np.sum(blind_path_mask > 0) / blind_path_mask.size)
+
+        blind_confident = blind_path_mask is not None and blind_area_ratio >= self.nav_min_area_ratio
+        if self.current_state == STATE_NAVIGATING:
+            if blind_confident:
+                self.nav_low_conf_streak = 0
+            else:
+                self.nav_low_conf_streak += 1
+                if self.nav_low_conf_streak >= self.nav_fallback_frames:
+                    self.current_state = STATE_ONBOARDING
+                    self.onboarding_step = ONBOARDING_STEP_ROTATION
+                    self.nav_low_conf_streak = 0
+                    logger.warning(
+                        "[BlindPath] 常规导航低置信度持续，回退到上盲道重对齐"
+                    )
+        elif self.current_state == STATE_ONBOARDING and blind_confident:
+            # 避免历史计数影响后续常规导航
+            self.nav_low_conf_streak = 0
         
         # 【调试】检查YOLO检测结果
         if self.frame_counter % 30 == 0:  # 每30帧打印一次
@@ -749,11 +792,12 @@ class BlindPathNavigator:
         # 【改进】语音优先级管理系统
         current_time = time.time()
 
-        # 绝对优先级：盲道阻断 > 过马路/斑马线 > 普通障碍 > 盲道导航
+        # 绝对优先级：盲道阻断 > 盲道导航/过马路/斑马线 > 普通障碍
         PRIORITY_BLINDPATH_BLOCK = 120
         PRIORITY_CROSSWALK = 80
-        PRIORITY_OBSTACLE_NORMAL = 40
-        PRIORITY_NAVIGATION = 10
+        PRIORITY_NAVIGATION = 80
+        PRIORITY_OBSTACLE_NORMAL = 10
+       
         
         # 收集所有可能的语音指令
         voice_candidates = []
@@ -1591,7 +1635,7 @@ class BlindPathNavigator:
             # 使用像素域方法
             pixel_features = self._get_pixel_domain_features(mask, image.shape)
             if not pixel_features:
-                return ""
+                return self._generate_blindpath_acquire_guidance(mask, image_height, image_width, frame_visualizations)
             self._add_navigation_info_visualization(pixel_features, image_height, image_width, frame_visualizations)
             guidance_text = self._handle_pixel_domain_onboarding(
                 pixel_features, image_height, image_width, frame_visualizations
@@ -1607,7 +1651,7 @@ class BlindPathNavigator:
         # 提取路径特征
         features = self._get_pixel_domain_features(mask, image.shape)
         if not features:
-            return ""
+            return self._generate_blindpath_acquire_guidance(mask, image_height, image_width, frame_visualizations)
         self._add_navigation_info_visualization(features, image_height, image_width, frame_visualizations)
         
         # 转弯检测
@@ -2327,9 +2371,28 @@ class BlindPathNavigator:
         center_offset_pixels = x_target - image_width / 2
         center_offset_ratio = abs(center_offset_pixels) / image_width
         orientation_error_rad = features['tangent_angle_rad']
+
+        # 近场优先门控：近场偏移显著时，优先引导左右平移（避免透视导致的误转向）
+        y_near = int(image_height * self.NAV_NEAR_Y_RATIO)
+        y_near = max(0, min(image_height - 1, y_near))
+        x_near = poly_func(y_near)
+        near_offset_pixels = x_near - image_width / 2
+        near_offset_ratio = abs(near_offset_pixels) / image_width
+
+        # 可视化近场目标点，便于调参与排查
+        frame_visualizations.append({
+            "type": "circle",
+            "center": [int(x_near), int(y_near)],
+            "radius": 8,
+            "color": "yellow"
+        })
+
+        near_gate_active = near_offset_ratio > self.NAV_NEAR_CENTER_OFFSET_THRESHOLD_RATIO
         
+        if near_gate_active:
+            guidance_text = "右移" if near_offset_pixels > 0 else "左移"
         # 先检查是否需要平移（左移/右移），优先回到中线
-        if center_offset_ratio > self.NAV_CENTER_OFFSET_THRESHOLD_RATIO:
+        elif center_offset_ratio > self.NAV_CENTER_OFFSET_THRESHOLD_RATIO:
             guidance_text = "右移" if center_offset_pixels > 0 else "左移"
         # 再检查是否需要转向（左转/右转）
         elif orientation_error_rad > self.NAV_ORIENTATION_THRESHOLD_RAD:
@@ -2345,9 +2408,45 @@ class BlindPathNavigator:
             "状态": "常规导航",
             "引导": guidance_text,
             "朝向": f"{np.degrees(orientation_error_rad):.1f}°",
-            "偏移": f"{center_offset_ratio * 100:.1f}%"
+            "偏移": f"{center_offset_ratio * 100:.1f}%",
+            "近场偏移": f"{near_offset_ratio * 100:.1f}%",
+            "近场门控": "开启" if near_gate_active else "关闭"
         }, (25, image_height - 75))
         
+        return guidance_text
+
+    def _generate_blindpath_acquire_guidance(self, mask, image_height, image_width, frame_visualizations):
+        """远距盲道靠近引导：当仅识别到小片段盲道时，给出靠近方向。"""
+        if mask is None or mask.size == 0:
+            return ""
+
+        area_ratio = float(np.sum(mask > 0) / mask.size)
+        if area_ratio < self.ACQUIRE_MIN_AREA_RATIO:
+            return ""
+
+        y_coords, x_coords = np.where(mask > 0)
+        if len(x_coords) < 20:
+            return ""
+
+        center_x_ratio = float(np.mean(x_coords) / image_width)
+        bottom_y_ratio = float(np.max(y_coords) / image_height)
+
+        # 只识别到小片段时给“靠近”引导，避免与常规导航产生冲突。
+        if center_x_ratio < 0.42:
+            guidance_text = "检测到左前方盲道"
+        elif center_x_ratio > 0.58:
+            guidance_text = "检测到右前方盲道"
+        else:
+            guidance_text = "检测到前方盲道"
+
+        self._add_data_panel(frame_visualizations, {
+            "状态": "远距靠近",
+            "引导": guidance_text,
+            "面积": f"{area_ratio * 100:.2f}%",
+            "位置": f"{center_x_ratio:.2f}",
+            "距离": "较远" if bottom_y_ratio < 0.55 else "中等"
+        }, (25, image_height - 75))
+
         return guidance_text
     
     def _handle_pixel_domain_onboarding(self, pixel_features, image_height, image_width, frame_visualizations):
@@ -3284,7 +3383,8 @@ class BlindPathNavigator:
     
     def reset(self):
         """重置导航器状态"""
-        self.current_state = STATE_ONBOARDING
+        # 与初始化保持一致：默认常规导航，低置信度再回退上盲道
+        self.current_state = STATE_NAVIGATING
         self.onboarding_step = ONBOARDING_STEP_ROTATION
         self.maneuver_step = MANEUVER_STEP_1_ISSUE_COMMAND
         self.maneuver_target_info = None
@@ -3340,6 +3440,7 @@ class BlindPathNavigator:
         self.last_nav_spoken_text = ""
         self.last_nav_spoken_time = 0.0
         self.same_nav_text_streak = 0
+        self.nav_low_conf_streak = 0
         self.crosswalk_ready_announced = False
         self.crosswalk_ready_time = 0
         self.traffic_light_history.clear()
@@ -3444,8 +3545,9 @@ class BlindPathNavigator:
         if not obstacles:
             return []
 
-        _, w = image_shape
+        h, w = image_shape
         lateral_thresh = max(LATERAL_FLOW_MIN_PX, w * LATERAL_FLOW_MIN_RATIO)
+        vertical_cap = max(LATERAL_FLOW_MAX_DY_PX, h * LATERAL_FLOW_MAX_DY_RATIO)
 
         for obs in obstacles:
             obs['is_lateral_fast_traffic'] = False
@@ -3481,14 +3583,28 @@ class BlindPathNavigator:
                 best_prev.get('mask')
             )
 
+            prev_area_ratio = float(best_prev.get('area_ratio', 0.0) or 0.0)
+            curr_area_ratio = float(obs.get('area_ratio', 0.0) or 0.0)
+            prev_bottom_y_ratio = float(best_prev.get('bottom_y_ratio', 0.0) or 0.0)
+            curr_bottom_y_ratio = float(obs.get('bottom_y_ratio', 0.0) or 0.0)
+
+            # 纵向接近（面积/底部占比明显增长）时，不应被判为横向车流掩码对象
+            is_approaching = (
+                (curr_area_ratio - prev_area_ratio) >= LATERAL_APPROACH_AREA_GROWTH
+                or (curr_bottom_y_ratio - prev_bottom_y_ratio) >= LATERAL_APPROACH_BOTTOM_GROWTH
+            )
+
             obs['flow_dx'] = dx
             obs['flow_dy'] = dy
             obs['flow_points'] = flow_points
+            obs['is_approaching_motion'] = is_approaching
 
             is_lateral_fast = (
                 flow_points >= LATERAL_FLOW_MIN_POINTS
                 and abs(dx) >= lateral_thresh
                 and abs(dx) >= LATERAL_FLOW_DOMINANCE * (abs(dy) + 1e-3)
+                and abs(dy) <= vertical_cap
+                and not is_approaching
             )
             if is_lateral_fast:
                 obs['is_lateral_fast_traffic'] = True
