@@ -116,8 +116,8 @@ class LocalQwenClient:
         message: str,
         images: Optional[List[Union[np.ndarray, str, bytes]]] = None,
         history: Optional[List[Dict[str, Any]]] = None,
-        max_tokens: int = 128,
-        temperature: float = 0.2,
+        max_tokens: int = 20,
+        temperature: float = 0.1,
     ) -> str:
         """
         异步聊天接口
