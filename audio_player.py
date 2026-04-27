@@ -93,6 +93,10 @@ _playing_lock = threading.Lock()  # 播放锁
 _initialized = False
 _last_play_ts = 0.0  # 记录上次播放结束时间，用于决定预热静音长度
 
+# 抢占机制：高优先级语音可请求中断当前播放。仅本地 sounddevice 路径实际生效（HTTP/浏览器推送不可中途刪减）。
+_abort_current_event = threading.Event()
+_current_is_critical = False  # 当前正在播放的是否为 critical（critical 不被抢占）
+
 # 语音代际：模式切换时递增，用于丢弃旧线程/旧模式语音
 _voice_generation = 0
 _generation_lock = threading.Lock()
@@ -247,15 +251,20 @@ def _audio_worker():
                 if priority_data is None:
                     break
                 # 解包优先级和实际音频数据（兼容 2 元组 / 3 元组）
+                global _current_is_critical
+                _current_is_critical = False
                 if isinstance(priority_data, tuple):
                     if len(priority_data) == 3:
                         _, audio_data, _is_critical = priority_data
+                        _current_is_critical = bool(_is_critical)
                     elif len(priority_data) == 2:
                         _, audio_data = priority_data
                     else:
                         audio_data = priority_data
                 else:
                     audio_data = priority_data
+                # 启动新任务前清 abort 标志，避免被上一轮遗留的 abort 误中新音频
+                _abort_current_event.clear()
                 await _broadcast_audio_optimized(audio_data)
             except Exception as e:
                 print(f"[AUDIO] 工作线程错误: {e}")
@@ -310,9 +319,28 @@ async def _broadcast_audio_optimized(pcm_data: bytes):
             if not audio_array.flags['C_CONTIGUOUS']:
                 audio_array = audio_array.copy()
 
-            # 直接播放（阻塞方式，确保播放完成）
+            # 可抢占的播放：轮询 abort_event，高优先级请求可中断当前播放
             sd.play(audio_array, samplerate=8000)
-            sd.wait()  # 等待播放完成
+            try:
+                while True:
+                    stream = sd.get_stream() if hasattr(sd, "get_stream") else None
+                    active = bool(stream.active) if stream is not None else False
+                    if not active:
+                        break
+                    if _abort_current_event.is_set() and not _current_is_critical:
+                        try:
+                            sd.stop()
+                        except Exception:
+                            pass
+                        print("[AUDIO] 当前播放被抢占中断")
+                        break
+                    time.sleep(0.02)
+            except Exception:
+                # 充底退路：如果轮询 API 不可用，退回原始阻塞等待
+                try:
+                    sd.wait()
+                except Exception:
+                    pass
 
             _last_play_ts = time.monotonic()
             return
@@ -402,6 +430,27 @@ def _drain_queue_preserve_critical():
             break
     _audio_queue = new_q
     return preserved
+
+
+def abort_current_playback(reason: str = "") -> bool:
+    """请求中断当前正在播放的音频（仅本地 sounddevice 路径生效）。
+
+    - 当前播放为 critical 时拒绝中断，返回 False
+    - 否则置位 abort 事件，worker 轮询到后调用 sd.stop()，返回 True
+    """
+    if _current_is_critical:
+        return False
+    _abort_current_event.set()
+    if reason:
+        print(f"[AUDIO] abort_current_playback: {reason}")
+    return True
+
+
+def drain_non_critical_queue() -> int:
+    """清空待播队列中的非 critical 项，返回保留的 critical 项数。"""
+    with _queue_lock:
+        preserved = _drain_queue_preserve_critical()
+    return len(preserved)
 
 
 def play_audio_threadsafe(audio_key, critical: bool = False):

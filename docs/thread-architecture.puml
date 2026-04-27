@@ -1,0 +1,185 @@
+@startuml thread-architecture
+title 智能盲人导航系统 · 线程与协程流转图\n(Android 手机端 ⇄ Python 后端)
+
+skinparam backgroundColor #1e1e1e
+skinparam defaultFontColor #e0e0e0
+skinparam defaultFontSize 12
+skinparam shadowing false
+skinparam ArrowColor #80cbc4
+skinparam ArrowFontColor #b0bec5
+
+skinparam rectangle {
+    BorderColor #546e7a
+    BackgroundColor #263238
+    FontColor #eceff1
+}
+skinparam package {
+    BorderColor #78909c
+    BackgroundColor #2b3a42
+    FontColor #ffd54f
+}
+skinparam queue {
+    BorderColor #ffb74d
+    BackgroundColor #3e2723
+    FontColor #ffe0b2
+}
+skinparam database {
+    BorderColor #81c784
+    BackgroundColor #1b3a1f
+    FontColor #c8e6c9
+}
+skinparam cloud {
+    BorderColor #ba68c8
+    BackgroundColor #311b3f
+    FontColor #e1bee7
+}
+
+' ============ 图例 ============
+legend top right
+|<#263238> **图例**|<#263238>  |
+|<#4e342e> 真实 OS 线程 |<#4e342e>   |
+|<#1b3a3a> asyncio 协程 |<#1b3a3a>   |
+|<#3e2723> 线程安全队列 |<#3e2723>   |
+|<#311b3f> 外部云服务 |<#311b3f>   |
+endlegend
+
+' =====================================================
+' ============= 手机端（Android）=======================
+' =====================================================
+package "📱 Android 手机端 (appsource)" as ANDROID {
+
+    rectangle "**Main / UI Thread**\n(Looper.getMainLooper)\n—— MainActivity.java ——\n• 渲染 tvPartial/tvFinal\n• MediaPlayer 播放 TTS\n• ttsFallbackHandler (1200ms 兜底本地 TTS)" as UI #4e342e
+
+    rectangle "**analyzerExecutor**\n(单线程 Executor)\n—— CameraPipeline.java ——\n• CameraX ImageAnalysis 回调\n• YUV_420_888 → NV21\n• 15 FPS 节流 + encoderBusy 背压\n• ImageProxy 快速 close()" as ANALYZER #4e342e
+
+    rectangle "**encoderExecutor**\n(单线程 Executor)\n—— CameraPipeline.java ——\n• NV21 → JPEG (质量 75)\n• 回调 sink.onJpeg()" as ENCODER #4e342e
+
+    rectangle "**audioExecutor**\n(单线程 Executor)\n—— AudioWebSocketClient.java ——\n• AudioRecord 录制 PCM16 / 16kHz\n• 每 200ms 读 6400 bytes\n• WS 发送二进制 PCM" as AUDIOEXE #4e342e
+
+    rectangle "**OkHttp 内部线程池**\n(WebSocket I/O)\n• UiWebSocketClient\n• AudioWebSocketClient\n• CameraWebSocketClient\n• onMessage/onOpen/onFailure" as OKHTTP #4e342e
+}
+
+' 手机端内部流转
+ANALYZER -down-> ENCODER : NV21 + 背压标志\nencoderBusy (AtomicBoolean)
+ENCODER -down-> OKHTTP : sendJpeg(byte[])
+AUDIOEXE -down-> OKHTTP : PCM16 二进制帧
+OKHTTP -up-> UI : runOnUiThread(...)\nPARTIAL / FINAL / TTS_AUDIO
+
+' =====================================================
+' ============= 后端（Python / FastAPI）===============
+' =====================================================
+package "🖥 Python 后端 (Blind_for_Navigation)" as BACKEND {
+
+    package "Uvicorn 主事件循环 (asyncio)" as LOOP {
+        rectangle "**/ws/camera** 协程\n• 接收 JPEG\n• 写入 _latest_jpeg\n(_latest_jpeg_lock)" as WS_CAM #1b3a3a
+        rectangle "**/ws/audio** 协程\n(ASR 上行)\n• 转发到 asr_core\n• asyncio.Lock()" as WS_AUDIO #1b3a3a
+        rectangle "**/ws/viewer** 协程\n• 向浏览器推可视化 JPEG\n• camera_viewers 集合" as WS_VIEWER #1b3a3a
+        rectangle "**ASR 协程**\n(DashScope Paraformer)\n• partial/final 回调\n• ui_broadcast_final()" as ASR #1b3a3a
+        rectangle "**Omni 对话协程**\n(Qwen-Omni-Turbo)\n• 流式文本 + PCM\n• broadcast_pcm16_realtime()" as OMNI #1b3a3a
+        rectangle "**keepalive / IMU 广播**\n协程任务" as MISC #1b3a3a
+    }
+
+    queue "**bridge_io**\n(原始 JPEG / 可视化 JPEG)\nmaxlen=4 丢旧保新" as BRIDGE #3e2723
+    queue "**_audio_queue**\nPriorityQueue(maxsize=10)\n_voice_generation 代际过滤" as AUDIOQ #3e2723
+    queue "**_yolo_input_frame**\n+ _yolo_input_lock" as YOLOQ #3e2723
+
+    rectangle "**display 线程**\n(threading, name=display)\n—— app_main.py ——\n• 从 _latest_jpeg 拉最新帧\n• bridge_io.push_raw_jpeg()\n• last_frames 时间戳队列" as T_DISPLAY #4e342e
+
+    rectangle "**yolo 线程**\n(threading, name=yolo)\n—— app_main.py ——\n• 解码 JPEG → BGR\n• 投递 _infer_executor\n• NavigationMaster.process()" as T_YOLO #4e342e
+
+    rectangle "**_infer_executor**\nThreadPoolExecutor(max_workers=1)\n• 序列化 GPU 推理\n• loop.run_in_executor()" as INFER #4e342e
+
+    rectangle "**NavigationMaster 状态机**\n(同步执行于 _infer_executor)\n• BlindPathNavigator\n• CrossStreetNavigator\n• TrafficLight / Crosswalk" as NAV #4e342e
+
+    rectangle "**obs-detect 线程**\n(threading)\n—— workflow_blindpath.py ——\n• 盲道障碍物异步检测\n• _obs_cache + _obs_lock" as T_OBS #4e342e
+
+    rectangle "**yolomedia 线程**\n(threading, daemon)\n—— app_main.py ——\n• 物品查找 YOLOE\n• bridge_io.wait_raw_bgr()\n• yolomedia_stop_event 控制" as T_YMEDIA #4e342e
+
+    rectangle "**_audio_worker 线程**\n(threading, daemon)\n—— audio_player.py ——\n• 阻塞读 _audio_queue\n• PyAudio 播放 WAV\n• _tts_audio_callback 广播" as T_AUDIO #4e342e
+
+    rectangle "**TTS 生成线程**\n(按需 threading)\n—— audio_player.py ——\n• Edge TTS / pyttsx3\n• 生成 WAV → _audio_queue" as T_TTS #4e342e
+}
+
+' ============ 外部云服务 ============
+cloud "DashScope\nParaformer ASR" as CLOUD_ASR #311b3f
+cloud "DashScope\nQwen-Omni-Turbo" as CLOUD_OMNI #311b3f
+cloud "Edge TTS\n(Microsoft)" as CLOUD_TTS #311b3f
+
+' =====================================================
+' ========== 跨端 WebSocket 链接 =======================
+' =====================================================
+OKHTTP ==> WS_CAM : **WS /ws/camera**\nJPEG 二进制
+OKHTTP ==> WS_AUDIO : **WS /ws/audio**\nPCM16 二进制
+WS_VIEWER ==> OKHTTP : **文本/二进制**\n可视化帧 · TTS · FINAL/PARTIAL
+
+' =====================================================
+' ========== 后端内部线程流转 ==========================
+' =====================================================
+WS_CAM -down-> T_DISPLAY : _latest_jpeg\n(共享变量 + Lock)
+T_DISPLAY -right-> BRIDGE : push_raw_jpeg()
+BRIDGE -down-> T_YMEDIA : wait_raw_bgr()\n(物品查找模式)
+BRIDGE -down-> YOLOQ : _set_yolo_input_frame()
+YOLOQ -right-> T_YOLO : 拉取最新 JPEG
+T_YOLO -down-> INFER : loop.run_in_executor\n(协程 ↔ 线程池桥)
+INFER -right-> NAV : 同步调用
+NAV -down-> T_OBS : 共享 _latest_frame
+T_OBS -up-> NAV : _obs_cache
+
+NAV -up-> BRIDGE : send_vis_jpeg()\n(标注图回写)
+BRIDGE -up-> WS_VIEWER : 广播给浏览器
+T_YMEDIA -up-> BRIDGE : send_vis_bgr()
+
+' 语音路径
+NAV ..> T_TTS : play_voice_text(text, priority)
+T_TTS -down-> AUDIOQ : WAV 文件路径
+AUDIOQ -right-> T_AUDIO : 阻塞出队
+T_AUDIO .up.> WS_VIEWER : _tts_audio_callback\n(asyncio.run_coroutine_threadsafe)
+T_TTS ..> CLOUD_TTS : HTTP
+
+' ASR / Omni
+WS_AUDIO -down-> ASR : PCM 转发
+ASR ..> CLOUD_ASR : WebSocket
+ASR -up-> WS_VIEWER : ui_broadcast_final()\nPARTIAL / FINAL
+ASR ..> OMNI : 触发 start_ai_with_text()
+OMNI ..> CLOUD_OMNI : 流式调用
+OMNI -up-> WS_VIEWER : 文本 + TTS_AUDIO
+
+' =====================================================
+' ========== 关键桥接说明（备注） =====================
+' =====================================================
+note right of INFER
+**协程 → 线程池桥接**
+`loop.run_in_executor(_infer_executor, fn)`
+推理序列化避免 GPU 上下文切换
+end note
+
+note right of T_AUDIO
+**线程 → 协程桥接**
+`asyncio.run_coroutine_threadsafe(
+   coro, main_loop)`
+工作线程向主事件循环投递任务
+end note
+
+note left of UI
+**OkHttp → UI 桥接**
+`runOnUiThread(Runnable)`
+所有 TextView / MediaPlayer 操作
+必须切回主线程
+end note
+
+note bottom of BRIDGE
+**bridge_io 作用**
+线程安全滑动窗口 (maxlen=4)
+生产者：display / yolo / yolomedia
+消费者：yolo / yolomedia / viewer
+丢旧保新 → 低延迟优先
+end note
+
+note bottom of AUDIOQ
+**_voice_generation 代际过滤**
+模式切换时 +1，
+worker 出队时若代际过旧直接丢弃
+→ 避免"过马路"语音残留到"盲道"模式
+end note
+
+@enduml
