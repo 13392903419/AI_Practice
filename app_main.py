@@ -602,16 +602,15 @@ def play_voice_text_with_state(text: str):
 async def start_ai_with_text_custom(user_text: str):
     global chat_mode_enabled, omni_conversation_active, omni_previous_nav_state
 
-    # ============== 声纹门控 ==============
-    # 仅唤醒词校验策略：每次 ASR final 进 Agent 前做一次声纹检查。
-    # 默认 debug 模式仅日志不拦截；VOICEPRINT_ENABLED=0 完全跳过。
+    # ============== 唤醒词 + 声纹门控 ==============
+    # 未激活态：仅 "小慧小慧启动" 才会触发声纹校验并进入会话
+    # 激活态：所有 ASR 放行，每条刷新会话计时；静默超时自动退出
     try:
-        from voiceprint import voiceprint_gate
-        if not voiceprint_gate(reason="asr_final"):
-            print(f"[VOICEPRINT] 拦截非机主语音: {user_text}", flush=True)
+        from wake_word import wake_session
+        if not wake_session.gate(user_text):
             return
     except Exception as e:
-        print(f"[VOICEPRINT] gate 异常，放行: {e}", flush=True)
+        print(f"[WAKE] gate 异常，放行: {e}", flush=True)
 
     # ============== MCP 导航 Agent 拦截 ==============
     # 识别到导航/取消/ETA 意图时，直接走 navigation_agent，不调默认 Agent
