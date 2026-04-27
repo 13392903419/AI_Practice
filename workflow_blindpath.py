@@ -17,6 +17,7 @@ import torch  # 添加这行
 from obstacle_detector_client import ObstacleDetectorClient
 from audio_player import play_voice_text  # 新增
 from crosswalk_awareness import CrosswalkAwarenessMonitor, split_combined_voice  # 斑马线感知
+from obstacle_distance import annotate as _annotate_obstacle_distance, format_distance_phrase as _format_distance_phrase
 # 尝试导入 Pillow，用于中文显示
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -2138,6 +2139,13 @@ class BlindPathNavigator:
             
             # 补充一些可能缺失但后续代码需要的字段
             H, W = image.shape[:2]
+
+            # 单目地面投影：为每个障碍物注入估算的水平距离 distance_m
+            try:
+                _annotate_obstacle_distance(detected_obstacles, H)
+            except Exception as _dist_err:
+                logger.warning(f"[_detect_obstacles] 距离估算失败: {_dist_err}")
+
             for i, obj in enumerate(detected_obstacles):
                 # 添加用于可视化的边界框坐标
                 if 'mask' in obj and obj['mask'] is not None:
@@ -2214,13 +2222,23 @@ class BlindPathNavigator:
             main_obstacle = max(candidate_obstacles, key=self._obstacle_danger_score)
             obstacle_name = main_obstacle.get('name', '')
             current_time = time.time()
+            # 距离档位：进入紧急档时让 key 变化以绕过 5s 冷却，立刻重播紧急话术
+            _dist = main_obstacle.get('distance_m')
+            if _dist is None:
+                _dist_band = 'far'
+            elif _dist < 2.0:
+                _dist_band = 'urgent'
+            elif _dist < 5.0:
+                _dist_band = 'warn'
+            else:
+                _dist_band = 'far'
             speech_key = (
-                f"blindpath_block:{obstacle_name}"
+                f"blindpath_block:{obstacle_name}:{_dist_band}"
                 if is_blind_path_blocked else
-                f"near:{obstacle_name}"
+                f"near:{obstacle_name}:{_dist_band}"
             )
             if crosswalk_active:
-                speech_key = f"crosswalk_emergency:{obstacle_name}"
+                speech_key = f"crosswalk_emergency:{obstacle_name}:{_dist_band}"
 
             # 检查是否需要播报
             should_announce = False
@@ -2235,16 +2253,18 @@ class BlindPathNavigator:
                 self.last_obstacle_speech_time = current_time
 
             if should_announce:
+                distance_m = main_obstacle.get('distance_m')
                 voice_text = (
-                    self._speech_for_blind_path_block(obstacle_name)
+                    self._speech_for_blind_path_block(obstacle_name, distance_m)
                     if is_blind_path_blocked else
-                    self._speech_for_obstacle(obstacle_name)
+                    self._speech_for_obstacle(obstacle_name, distance_m)
                 )
                 self.pending_obstacle_voice = {
                     'text': voice_text,
                     'danger': self._obstacle_danger_score(main_obstacle) + (3.0 if is_blind_path_blocked else 0.0),
                     'mode': obstacle_mode,
                     'name': obstacle_name,
+                    'distance_m': distance_m,
                     'ts': current_time,
                 }
         else:
@@ -2828,23 +2848,35 @@ class BlindPathNavigator:
         except:
             return '障碍物'
 
-    def _speech_for_obstacle(self, name: str) -> str:
+    def _speech_for_obstacle(self, name: str, distance_m: float = None) -> str:
         k = (name or '').strip().lower()
-        if k == 'person': return "前方有人，注意避让。"
-        if k == 'car': return "前方有车，注意避让。"
-        if k == 'bicycle': return "前方有自行车，停一下。"
-        if k == 'motorcycle': return "前方有摩托车，停一下。"
-        if k == 'bus': return "前方有公交车，停一下。"
-        if k == 'truck': return "前方有卡车，停一下。"
-        if k == 'scooter': return "前方有电瓶车，停一下。"
-        if k == 'stroller': return "前方有电瓶车，停一下。"
-        if k == 'dog': return "前方有狗，停一下。"
-        if k == 'animal': return "前方有动物，停一下。"
-        return "前方有障碍物，注意避让。"
+        # 物体名（中文）
+        obj_map = {
+            'person': '人', 'car': '车', 'bicycle': '自行车', 'motorcycle': '摩托车',
+            'bus': '公交车', 'truck': '卡车', 'scooter': '电瓶车', 'stroller': '电瓶车',
+            'dog': '狗', 'animal': '动物',
+        }
+        obj_cn = obj_map.get(k, '障碍物')
+        # 紧急级动作短语
+        urgent_kinds = {'car', 'bicycle', 'motorcycle', 'bus', 'truck', 'scooter', 'stroller', 'dog', 'animal'}
+        action = '停一下' if k in urgent_kinds else '注意避让'
 
-    def _speech_for_blind_path_block(self, name: str) -> str:
+        # 距离档位：< 2m 紧急，2~5m 警告，否则不带距离
+        dist_phrase = ''
+        if distance_m is not None:
+            if distance_m < 2.0:
+                dist_phrase = _format_distance_phrase(distance_m) + '处'
+                action = '紧急避让'
+            elif distance_m < 5.0:
+                dist_phrase = _format_distance_phrase(distance_m) + '处'
+
+        if dist_phrase:
+            return f"前方{dist_phrase}有{obj_cn}，{action}。"
+        return f"前方有{obj_cn}，{action}。"
+
+    def _speech_for_blind_path_block(self, name: str, distance_m: float = None) -> str:
         # 复用本地已缓存的障碍物播报文案，避免新句式触发慢合成。
-        return self._speech_for_obstacle(name)
+        return self._speech_for_obstacle(name, distance_m)
 
     def _draw_command_button(self, image, text):
         """绘制底部中央的指令按钮（与斑马线模式统一）"""
