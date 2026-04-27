@@ -602,6 +602,27 @@ def play_voice_text_with_state(text: str):
 async def start_ai_with_text_custom(user_text: str):
     global chat_mode_enabled, omni_conversation_active, omni_previous_nav_state
 
+    # ============== 声纹门控 ==============
+    # 仅唤醒词校验策略：每次 ASR final 进 Agent 前做一次声纹检查。
+    # 默认 debug 模式仅日志不拦截；VOICEPRINT_ENABLED=0 完全跳过。
+    try:
+        from voiceprint import voiceprint_gate
+        if not voiceprint_gate(reason="asr_final"):
+            print(f"[VOICEPRINT] 拦截非机主语音: {user_text}", flush=True)
+            return
+    except Exception as e:
+        print(f"[VOICEPRINT] gate 异常，放行: {e}", flush=True)
+
+    # ============== MCP 导航 Agent 拦截 ==============
+    # 识别到导航/取消/ETA 意图时，直接走 navigation_agent，不调默认 Agent
+    try:
+        from navigation_agent import navigation_agent
+        if await navigation_agent.handle_voice_text(user_text):
+            print(f"[NAV-AGENT] 已接管语音指令: {user_text}", flush=True)
+            return
+    except Exception as e:
+        print(f"[NAV-AGENT] handle_voice_text 异常，回退默认 Agent: {e}", flush=True)
+
     route_state = {
         "chat_mode_enabled": chat_mode_enabled,
         "omni_conversation_active": omni_conversation_active,
@@ -950,6 +971,33 @@ async def webcam_status():
         "camera_info": webcam_handler.get_camera_info() if webcam_active else None
     }
 
+
+# ============== MCP 导航：手机端定位上报 ==============
+@app.post("/api/location")
+async def report_location(payload: dict):
+    """手机端定位上报。请求体：{"lon": 121.5, "lat": 31.2}
+
+    前端可用 navigator.geolocation.watchPosition 周期上报。
+    坐标系建议为 WGS84，调用 高德 API 时由 navigation_service 内部按需转换。
+    """
+    try:
+        lon = float(payload.get("lon"))
+        lat = float(payload.get("lat"))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "invalid lon/lat"}
+
+    from navigation_agent import navigation_agent
+    navigation_agent.update_current_position(lon, lat)
+    return {"ok": True, "nav_active": navigation_agent.is_active()}
+
+
+@app.get("/api/navigation/status")
+async def navigation_status():
+    """查询当前 MCP 导航是否激活，便于前端显示状态。"""
+    from navigation_agent import navigation_agent
+    return {"active": navigation_agent.is_active()}
+
+
 @app.post("/api/webcam/capture")
 async def capture_webcam_frame():
     """
@@ -1131,6 +1179,12 @@ async def ws_audio(ws: WebSocket):
                 if streaming and recognition:
                     try:
                         recognition.send_audio_frame(msg["bytes"])
+                        # 同步写入声纹环形缓冲（仅进行入口，不影响 ASR）
+                        try:
+                            from voiceprint import recent_audio_buffer
+                            recent_audio_buffer.append(msg["bytes"])
+                        except Exception:
+                            pass
                         last_ts = time.monotonic()
                     except Exception:
                         await on_sdk_error("send_audio_frame failed")
