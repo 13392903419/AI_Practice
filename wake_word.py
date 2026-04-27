@@ -10,7 +10,7 @@
 4. 静默超过 WAKE_SESSION_TIMEOUT 秒：自动退出激活态
 
 环境变量：
-- WAKE_ENABLED:          唤醒门控总开关，默认 1
+- WAKE_ENABLED:          唤醒门控总开关，默认 0（关闭，不影响 ASR 主链路）
 - WAKE_PHRASE:           唤醒词，默认 "小慧小慧启动"（去标点/空格后匹配）
 - WAKE_SESSION_TIMEOUT:  会话静默超时秒数，默认 20
 - WAKE_REPLY_TEXT:       唤醒应答语，默认 "我在"
@@ -37,13 +37,19 @@ class WakeSession:
     """唤醒会话状态机（进程内单例）。"""
 
     def __init__(self) -> None:
-        self.enabled = os.getenv("WAKE_ENABLED", "1") not in ("0", "false", "False")
+        self.enabled = os.getenv("WAKE_ENABLED", "0") not in ("0", "false", "False")
         self.phrase_norm = _norm(os.getenv("WAKE_PHRASE", "小慧小慧启动"))
         self.session_timeout = float(os.getenv("WAKE_SESSION_TIMEOUT", "20"))
         self.reply_text = os.getenv("WAKE_REPLY_TEXT", "我在")
 
         self._active_until: float = 0.0
         self._lock = threading.Lock()
+        print(
+            f"[WAKE] 模块初始化: enabled={self.enabled} "
+            f"phrase='{os.getenv('WAKE_PHRASE', '小慧小慧启动')}' "
+            f"timeout={self.session_timeout}s",
+            flush=True,
+        )
 
     # ---------- 状态 ----------
     def is_active(self) -> bool:
