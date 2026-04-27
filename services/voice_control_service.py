@@ -35,6 +35,20 @@ def play_voice_text(
     raw_play_voice_text_fn(text, generation_id=effective_generation, priority=priority, source=source)
 
 
+def _mode_confirm_priority(text: str) -> int:
+    """模式切换确认语音统一抬高优先级，确保不会被导航环路语音挤掉。"""
+    if not text:
+        return 120
+    t = text.strip()
+    confirm_keywords = (
+        "已启动", "已停止", "已关闭", "已开启", "已更新",
+        "模式已", "开始导航", "停止导航", "红绿灯检测", "过马路模式", "盲道导航"
+    )
+    if any(k in t for k in confirm_keywords):
+        return 120
+    return 120
+
+
 async def start_ai_with_text_custom(user_text: str, state: Dict[str, Any], deps: Dict[str, Any]):
     """扩展版AI入口：语音命令路由与模式切换。"""
     ui_broadcast_final = deps["ui_broadcast_final"]
@@ -81,14 +95,14 @@ async def start_ai_with_text_custom(user_text: str, state: Dict[str, Any], deps:
             switch_voice_generation_fn("chat_mode_on")
             chat_mode_enabled = True
             state["chat_mode_enabled"] = True
-            play_voice_text_fn("对话模式已开启")
+            play_voice_text_fn("对话模式已开启", priority=_mode_confirm_priority("对话模式已开启"), source="mode_confirm")
             await ui_broadcast_final("[系统] 对话模式已开启，现在可以和我聊天了")
             return
         if "停止" in clean_text or "关闭" in clean_text or "结束" in clean_text:
             switch_voice_generation_fn("chat_mode_off")
             chat_mode_enabled = False
             state["chat_mode_enabled"] = False
-            play_voice_text_fn("对话模式已关闭")
+            play_voice_text_fn("对话模式已关闭", priority=_mode_confirm_priority("对话模式已关闭"), source="mode_confirm")
             await ui_broadcast_final("[系统] 对话模式已关闭，只响应导航命令")
             return
 
@@ -120,7 +134,15 @@ async def start_ai_with_text_custom(user_text: str, state: Dict[str, Any], deps:
 
             if agent_response.intent and agent_response.intent != "chat" and agent_response.intent != "find_object":
                 if agent_response.text:
-                    threading.Thread(target=lambda: play_voice_text_fn(agent_response.text), daemon=True).start()
+                    mode_confirm_text = agent_response.text
+                    threading.Thread(
+                        target=lambda: play_voice_text_fn(
+                            mode_confirm_text,
+                            priority=_mode_confirm_priority(mode_confirm_text),
+                            source="mode_confirm"
+                        ),
+                        daemon=True
+                    ).start()
                     await ui_broadcast_final(f"[Agent] {agent_response.text}")
                 return
 
@@ -163,11 +185,11 @@ async def start_ai_with_text_custom(user_text: str, state: Dict[str, Any], deps:
             switch_voice_generation_fn("start_crossing")
             orchestrator.start_crossing()
             print(f"[CROSS_STREET] 过马路模式已启动，状态: {orchestrator.get_state()}")
-            play_voice_text_fn("过马路模式已启动。")
+            play_voice_text_fn("过马路模式已启动。", priority=_mode_confirm_priority("过马路模式已启动。"), source="mode_confirm")
             await ui_broadcast_final("[系统] 过马路模式已启动")
         else:
             print("[CROSS_STREET] 警告：导航统领器未初始化！")
-            play_voice_text_fn("启动过马路模式失败，请稍后重试。")
+            play_voice_text_fn("启动过马路模式失败，请稍后重试。", priority=_mode_confirm_priority("启动过马路模式失败，请稍后重试。"), source="mode_confirm")
             await ui_broadcast_final("[系统] 导航系统未就绪")
         return
 
@@ -177,7 +199,7 @@ async def start_ai_with_text_custom(user_text: str, state: Dict[str, Any], deps:
             switch_voice_generation_fn("stop_crossing")
             orchestrator.stop_navigation()
             print(f"[CROSS_STREET] 导航已停止，状态: {orchestrator.get_state()}")
-            play_voice_text_fn("已停止导航。")
+            play_voice_text_fn("已停止导航。", priority=_mode_confirm_priority("已停止导航。"), source="mode_confirm")
             await ui_broadcast_final("[系统] 过马路模式已停止")
         else:
             await ui_broadcast_final("[系统] 导航系统未运行")
