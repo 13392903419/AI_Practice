@@ -674,8 +674,39 @@ def play_voice_text_with_state(text: str):
     """包装 play_voice_text，TTS 状态管理已在 audio_player.py 内部处理"""
     play_voice_text(text, source="state")
 
+
+def _is_emergency_voice_command(text: str) -> bool:
+    normalized = re.sub(r"[\s\W_]+", "", text or "", flags=re.UNICODE).lower()
+    if not normalized:
+        return False
+    emergency_phrases = (
+        "停止", "停下", "别说了",
+        "取消导航", "停止导航", "结束导航", "退出导航",
+        "不导航了", "不去了", "算了不去",
+    )
+    return any(phrase in normalized for phrase in emergency_phrases)
+
+
+def _voiceprint_allows_asr_final(text: str) -> bool:
+    try:
+        from voiceprint import voiceprint_gate
+        allowed = voiceprint_gate(reason="asr_final")
+    except Exception as e:
+        print(f"[VOICEPRINT] gate 异常，放行: {e}", flush=True)
+        return True
+
+    if not allowed:
+        print(f"[VOICEPRINT] reject ASR final: {text}", flush=True)
+    return allowed
+
+
 async def start_ai_with_text_custom(user_text: str):
     global chat_mode_enabled, omni_conversation_active, omni_previous_nav_state
+
+    # ============== ASR final 声纹总门控 ==============
+    # 紧急停止类指令必须先放行；其它会触发导航/Agent 的文本先过机主声纹。
+    if not _is_emergency_voice_command(user_text) and not _voiceprint_allows_asr_final(user_text):
+        return
 
     # ============== 唤醒词 + 声纹门控 ==============
     # 未激活态：仅 "小慧小慧启动" 才会触发声纹校验并进入会话

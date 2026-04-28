@@ -21,6 +21,7 @@
 - VOICEPRINT_THRESHOLD    余弦相似度阈值（默认 0.75）
 - VOICEPRINT_BUFFER_SEC   环形缓冲秒数（默认 4.0）
 - VOICEPRINT_VERIFY_SEC   每次校验取最近 N 秒（默认 2.5）
+- VOICEPRINT_INPUT_SR     输入 PCM 采样率（默认 16000，与当前 ASR 管线一致）
 
 依赖：pip install resemblyzer numpy
 """
@@ -53,14 +54,14 @@ VOICEPRINT_BUFFER_SEC = float(os.getenv("VOICEPRINT_BUFFER_SEC", "4.0"))
 VOICEPRINT_VERIFY_SEC = float(os.getenv("VOICEPRINT_VERIFY_SEC", "2.5"))
 
 # 输入音频参数（与 ASR 管线一致）
-INPUT_SR = 8000
+INPUT_SR = int(os.getenv("VOICEPRINT_INPUT_SR", "16000"))
 INPUT_DTYPE = np.int16
 RESEMBLYZER_SR = 16000  # Resemblyzer 期望 16kHz
 
 
 # ============== 最近音频环形缓冲 ==============
 class RecentAudioBuffer:
-    """线程安全 PCM16 环形缓冲。保留最近 N 秒 8kHz 单声道。
+    """线程安全 PCM16 环形缓冲。保留最近 N 秒单声道音频。
 
     设计要点：
     - 直接持 int16 ndarray 列表，append 时丢弃过期段
@@ -178,14 +179,16 @@ class VoiceprintEngine:
 
     # ---------- 工具 ----------
     @staticmethod
-    def _resample_8k_to_16k(pcm_int16: np.ndarray) -> np.ndarray:
-        """简单 2x 上采样：线性插值。Resemblyzer 内部还会做 preprocess。"""
+    def _resample_to_resemblyzer_sr(pcm_int16: np.ndarray) -> np.ndarray:
+        """按输入采样率转为 Resemblyzer 需要的 16k float32。"""
         if pcm_int16.size == 0:
             return pcm_int16.astype(np.float32)
         f = pcm_int16.astype(np.float32) / 32768.0
-        # 线性插值 2 倍
+        if INPUT_SR == RESEMBLYZER_SR:
+            return f.astype(np.float32)
         x = np.arange(f.size)
-        x_new = np.linspace(0, f.size - 1, f.size * 2)
+        target_size = max(1, int(round(f.size * RESEMBLYZER_SR / float(INPUT_SR))))
+        x_new = np.linspace(0, f.size - 1, target_size)
         return np.interp(x_new, x, f).astype(np.float32)
 
     def _embed(self, pcm_int16: np.ndarray) -> Optional[np.ndarray]:
@@ -193,7 +196,7 @@ class VoiceprintEngine:
             return None
         try:
             from resemblyzer import preprocess_wav  # type: ignore
-            wav = self._resample_8k_to_16k(pcm_int16)
+            wav = self._resample_to_resemblyzer_sr(pcm_int16)
             wav = preprocess_wav(wav, source_sr=RESEMBLYZER_SR)
             if wav.size < RESEMBLYZER_SR * 0.5:  # 不足 0.5s 拒绝
                 return None
@@ -227,18 +230,19 @@ class VoiceprintEngine:
 
     # ---------- 对外：校验 ----------
     def verify(self, pcm_int16: np.ndarray) -> Tuple[bool, float]:
-        """返回 (是否匹配机主, 余弦相似度)。引擎不可用时 (True, 1.0) 放行。"""
+        """返回 (是否匹配机主, 余弦相似度)。严格模式下无法校验即拒绝。"""
         if not VOICEPRINT_ENABLED:
             return True, 1.0
+        strict_mode = not VOICEPRINT_DEBUG_ONLY
         if not self._lazy_init():
-            return True, 1.0
+            return (False, 0.0) if strict_mode else (True, 1.0)
         if self._enrolled_embed is None:
-            # 未录入：放行（避免阻塞使用），但日志提示
-            return True, 1.0
+            print(f"[VOICEPRINT] 未加载录入声纹，strict={strict_mode}")
+            return (False, 0.0) if strict_mode else (True, 1.0)
         with self._lock:
             embed = self._embed(pcm_int16)
         if embed is None:
-            return True, 1.0  # 嵌入失败时不拦截
+            return (False, 0.0) if strict_mode else (True, 1.0)
         score = self._cosine(embed, self._enrolled_embed)
         return score >= VOICEPRINT_THRESHOLD, score
 
@@ -248,7 +252,7 @@ class VoiceprintEngine:
             return True, 1.0
         pcm = recent_audio_buffer.get_recent(VOICEPRINT_VERIFY_SEC)
         if pcm is None:
-            return True, 1.0
+            return (False, 0.0) if not VOICEPRINT_DEBUG_ONLY else (True, 1.0)
         return self.verify(pcm)
 
     @property

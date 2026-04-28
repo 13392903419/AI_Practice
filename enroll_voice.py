@@ -24,7 +24,7 @@ import time
 import numpy as np
 
 
-def record_audio(duration: float, sample_rate: int = 8000) -> np.ndarray:
+def record_audio(duration: float, sample_rate: int = 16000) -> np.ndarray:
     """从麦克风录制单声道 PCM16，返回 int16 ndarray。"""
     try:
         import sounddevice as sd
@@ -54,8 +54,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="机主声纹录入")
     parser.add_argument("--duration", type=float, default=8.0,
                         help="录音时长（秒），默认 8s")
-    parser.add_argument("--sr", type=int, default=8000,
-                        help="录音采样率，默认 8000（与 ASR 管线一致）")
+    parser.add_argument("--sr", type=int, default=16000,
+                        help="录音采样率，默认 16000（与 ASR 管线一致）")
     parser.add_argument("--output", type=str, default=None,
                         help="输出 .npz 文件路径，默认 model/voiceprint.npz")
     parser.add_argument("--retry", type=int, default=3,
