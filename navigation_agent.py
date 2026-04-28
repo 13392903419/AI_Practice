@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
@@ -51,6 +52,7 @@ class NavigationAgent:
         self._session_lock = asyncio.Lock()
         self._current_pos: Optional[Tuple[float, float]] = None
         self._pos_ts: float = 0.0
+        self._default_origin_logged = False
 
     # ---------- 位置源 ----------
     def update_current_position(self, lon: float, lat: float) -> None:
@@ -63,14 +65,42 @@ class NavigationAgent:
 
     async def _get_position(self) -> Optional[Tuple[float, float]]:
         # 超过 30s 未更新视为失效
-        if self._current_pos is None or (time.time() - self._pos_ts) > 30.0:
-            return None
-        return self._current_pos
+        max_age_sec = float(os.getenv("MCP_NAV_POSITION_MAX_AGE_SEC", "120"))
+        if self._current_pos is not None and (time.time() - self._pos_ts) <= max_age_sec:
+            return self._current_pos
+
+        default_origin = os.getenv("MCP_NAV_DEFAULT_ORIGIN", os.getenv("AMAP_DEFAULT_ORIGIN", "")).strip()
+        if default_origin:
+            try:
+                lon, lat = default_origin.split(",", 1)
+                origin = (float(lon), float(lat))
+                if not self._default_origin_logged:
+                    print(f"[NAV-AGENT] 使用测试起点 MCP_NAV_DEFAULT_ORIGIN={origin}", flush=True)
+                    self._default_origin_logged = True
+                return origin
+            except Exception as e:
+                print(f"[NAV-AGENT] 测试起点格式错误，应为 lon,lat: {default_origin} ({e})", flush=True)
+        return None
+
+    async def _wait_for_position(self, timeout_s: float = 5.0) -> Optional[Tuple[float, float]]:
+        deadline = time.time() + timeout_s
+        while True:
+            pos = await self._get_position()
+            if pos is not None:
+                return pos
+            if time.time() >= deadline:
+                return None
+            await asyncio.sleep(0.25)
 
     # ---------- 入口：语音文本 ----------
     async def handle_voice_text(self, text: str) -> bool:
         """处理 ASR final 文本。返回 True 表示已处理（不需走默认 Agent）。"""
         result = recognize_intent(text)
+        print(
+            f"[NAV-AGENT] intent={result.intent}, destination={result.destination}, "
+            f"source={result.source}, confidence={result.confidence:.2f}",
+            flush=True,
+        )
         if result.intent == Intent.NAVIGATE_TO and result.destination:
             await self._start_navigation(result.destination)
             return True
@@ -84,11 +114,13 @@ class NavigationAgent:
 
     # ---------- 启动导航 ----------
     async def _start_navigation(self, destination_text: str) -> None:
+        print(f"[NAV-AGENT] start navigation: {destination_text}", flush=True)
         # 先取消旧 session
         await self._cancel_navigation(reason="restart", silent=True)
 
-        origin = await self._get_position()
+        origin = await self._wait_for_position(float(os.getenv("MCP_NAV_WAIT_POSITION_SEC", "5.0")))
         if origin is None:
+            print("[NAV-AGENT] 缺少当前位置，无法规划 REST 导航", flush=True)
             audio_scheduler.speak(
                 "暂时无法获取你的位置，请确认手机已授权定位。",
                 channel=Channel.MCP_NAV,
@@ -104,8 +136,10 @@ class NavigationAgent:
             preempt=True,
         )
 
+        print(f"[NAV-AGENT] planning REST route: origin={origin}, destination={destination_text}", flush=True)
         plan = await navigation_service.plan_route(origin, destination_text)
         if plan is None or not plan.steps:
+            print(f"[NAV-AGENT] route plan failed: destination={destination_text}", flush=True)
             audio_scheduler.speak(
                 f"未能规划到{destination_text}的路线，请换个说法或检查网络。",
                 channel=Channel.MCP_NAV,
@@ -113,6 +147,11 @@ class NavigationAgent:
                 preempt=True,
             )
             return
+        print(
+            f"[NAV-AGENT] route ready: distance={plan.total_distance_m}m, "
+            f"duration={plan.total_duration_s}s, steps={len(plan.steps)}",
+            flush=True,
+        )
 
         # 激活导航互斥：盲道直行类提示自动压制
         audio_scheduler.set_navigation_active(True)

@@ -27,6 +27,7 @@
 
   body {
     margin: 0;
+    min-height: 100vh;
     background: var(--bg-cream);
     color: var(--text-primary);
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
@@ -46,23 +47,173 @@
   /* 主布局 */
   .app {
     display: grid;
-    grid-template-columns: 1fr 380px;
+    grid-template-columns: minmax(0, 1fr) 420px;
+    align-items: start;
     gap: 24px;
-    height: 100vh;
+    min-height: 100vh;
     padding: 24px;
   }
 
-  /* 左侧主舞台 */
-  .stage {
-    position: relative;
+  .workspace {
+    display: grid;
+    grid-template-rows: auto auto;
+    gap: 20px;
+    min-width: 0;
+  }
+
+  .location-panel {
+    display: flex;
+    flex-direction: column;
     border-radius: 16px;
     background: var(--card-bg);
     border: 1px solid var(--border-warm);
     box-shadow: 0 2px 8px rgba(0,0,0,0.04), 0 8px 32px rgba(0,0,0,0.06);
     overflow: hidden;
+    min-height: 360px;
   }
 
-  .canvas-wrap, #canvas {
+  .panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border-warm);
+    background: var(--bg-cream);
+  }
+
+  .panel-head h2 {
+    font-size: 18px;
+    color: var(--text-primary);
+  }
+
+  .location-tools {
+    display: grid;
+    grid-template-columns: auto minmax(180px, 1fr) auto;
+    gap: 8px;
+    width: min(560px, 100%);
+  }
+
+  .location-tools input {
+    min-width: 0;
+    border-radius: 8px;
+    border: 1px solid var(--border-warm);
+    background: var(--bg-cream);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 13px;
+    padding: 8px 12px;
+  }
+
+  .location-body {
+    display: grid;
+    grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
+    gap: 14px;
+    padding: 14px;
+    min-height: 0;
+    flex: 1;
+  }
+
+  .location-summary {
+    display: grid;
+    grid-template-rows: repeat(3, 1fr);
+    gap: 10px;
+    min-height: 0;
+  }
+
+  .info-block {
+    border: 1px solid var(--border-warm);
+    border-radius: 12px;
+    background: var(--bg-cream);
+    padding: 12px;
+    min-height: 0;
+  }
+
+  .info-label {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .info-value {
+    color: var(--text-primary);
+    font-size: 15px;
+    line-height: 1.45;
+    min-height: 1.45em;
+  }
+
+  .route-board {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    border: 1px solid var(--border-warm);
+    border-radius: 12px;
+    background: var(--bg-cream);
+    overflow: hidden;
+  }
+
+  .route-canvas {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    color: var(--text-muted);
+    text-align: center;
+  }
+
+  .route-foot {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 8px 14px;
+    border-top: 1px solid var(--border-warm);
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+
+  /* 左侧主舞台 */
+  .stage {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    border-radius: 16px;
+    background: var(--card-bg);
+    border: 1px solid var(--border-warm);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.04), 0 8px 32px rgba(0,0,0,0.06);
+    overflow: hidden;
+    min-height: min(720px, calc(100vh - 48px));
+  }
+
+  .stage-head {
+    position: relative;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-width: calc(100% - 340px);
+    padding: 16px 20px 12px;
+  }
+
+  .stage-head h2 {
+    font-size: 16px;
+    color: var(--text-primary);
+  }
+
+  .canvas-wrap {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    background: #000;
+  }
+
+  #canvas {
     position: absolute;
     inset: 0;
     width: 100%;
@@ -75,7 +226,7 @@
   .status-float {
     position: absolute;
     right: 16px;
-    top: 16px;
+    top: 14px;
     z-index: 30;
     display: flex;
     gap: 8px;
@@ -109,6 +260,8 @@
 
   /* 右侧聊天面板 */
   .chat {
+    position: sticky;
+    top: 24px;
     display: flex;
     flex-direction: column;
     border-radius: 16px;
@@ -116,27 +269,49 @@
     border: 1px solid var(--border-warm);
     box-shadow: 0 2px 8px rgba(0,0,0,0.04), 0 8px 32px rgba(0,0,0,0.06);
     overflow: hidden;
-    height: 100%;
+    height: calc(100vh - 48px);
   }
 
   /* 聊天头部 */
   .chat-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 14px;
+    align-items: start;
     padding: 16px 20px;
     border-bottom: 1px solid var(--border-warm);
     background: var(--bg-cream);
   }
 
+  .chat-head > div:first-child {
+    min-width: 0;
+  }
+
   .chat-head h2 {
     font-size: 18px;
+    line-height: 1.35;
+    white-space: nowrap;
     color: var(--text-primary);
   }
 
+  .chat-head .page-subtitle {
+    display: block;
+    margin-top: 4px;
+    line-height: 1.35;
+  }
+
   .controls {
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
+    width: 100%;
+  }
+
+  .controls button {
+    width: 100%;
+    min-width: 0;
+    padding-left: 10px;
+    padding-right: 10px;
   }
 
   button {
@@ -296,8 +471,56 @@
       grid-template-columns: 1fr;
       height: auto;
     }
+    .workspace {
+      grid-template-rows: auto auto;
+    }
+    .stage {
+      min-height: 620px;
+    }
+    .location-body {
+      grid-template-columns: 1fr;
+    }
     .chat {
+      position: static;
       height: 500px;
+    }
+  }
+
+  @media (max-width: 720px) {
+    .app {
+      padding: 12px;
+      gap: 12px;
+    }
+    .workspace {
+      gap: 12px;
+      grid-template-rows: auto auto;
+    }
+    .location-panel {
+      min-height: 520px;
+    }
+    .stage {
+      min-height: 520px;
+    }
+    .panel-head {
+      align-items: stretch;
+      flex-direction: column;
+    }
+    .location-tools {
+      grid-template-columns: 1fr;
+      width: 100%;
+    }
+    .stage-head {
+      max-width: calc(100% - 32px);
+      padding-bottom: 58px;
+    }
+    .status-float {
+      left: 16px;
+      right: 16px;
+      top: 54px;
+      max-width: none;
+    }
+    .canvas-wrap {
+      top: auto;
     }
   }
 
@@ -318,20 +541,63 @@
 <body>
 
 <div class="app">
-  <!-- 左侧主舞台 -->
-  <section class="stage">
-    <div class="canvas-wrap">
-      <canvas id="canvas"></canvas>
-      <div id="canvasHint" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:16px;pointer-events:none;text-align:center;padding:20px">📷 正在启动电脑摄像头…</div>
-    </div>
+  <!-- 左侧工作区 -->
+  <main class="workspace">
+    <section class="location-panel">
+      <div class="panel-head">
+        <div>
+          <h2>定位导航</h2>
+          <span class="page-subtitle">当前位置与目的地状态</span>
+        </div>
+        <div class="location-tools">
+          <button class="ghost" type="button">定位我的位置</button>
+          <input type="text" placeholder="输入目的地..." aria-label="输入目的地">
+          <button class="primary" type="button">搜索</button>
+        </div>
+      </div>
+      <div class="location-body">
+        <div class="location-summary">
+          <div class="info-block">
+            <div class="info-label">当前定位</div>
+            <div class="info-value" id="currentLocationText">等待定位...</div>
+          </div>
+          <div class="info-block">
+            <div class="info-label">目的地</div>
+            <div class="info-value" id="destinationText">尚未设置</div>
+          </div>
+          <div class="info-block">
+            <div class="info-label">导航状态</div>
+            <div class="info-value" id="routeStatusText">等待导航指令</div>
+          </div>
+        </div>
+        <div class="route-board">
+          <div class="route-canvas" id="routePreview">路线信息将在定位和规划完成后显示</div>
+          <div class="route-foot">
+            <span id="routeDistanceText">距离: --</span>
+            <span id="routeEtaText">预计: --</span>
+          </div>
+        </div>
+      </div>
+    </section>
 
-    <!-- 右上角状态浮窗 -->
-    <div class="status-float">
-      <span id="camStatus" class="badge">Camera: 连接中…</span>
-      <span id="asrStatus" class="badge">ASR: 连接中…</span>
-      <span id="fps" class="badge">FPS: --</span>
-    </div>
-  </section>
+    <section class="stage">
+      <div class="stage-head">
+        <h2>画面状态</h2>
+        <span class="page-subtitle">摄像头识别画面</span>
+      </div>
+      <div class="canvas-wrap">
+        <canvas id="canvas"></canvas>
+        <div id="canvasHint" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:16px;pointer-events:none;text-align:center;padding:20px">正在启动电脑摄像头…</div>
+      </div>
+
+      <!-- 右上角状态浮窗 -->
+      <div class="status-float">
+        <span id="camStatus" class="badge">Camera: 连接中…</span>
+        <span id="asrStatus" class="badge">ASR: 连接中…</span>
+        <span id="fps" class="badge">FPS: --</span>
+      </div>
+    </section>
+  </main>
 
   <!-- 右侧聊天面板 -->
   <aside class="chat">

@@ -108,6 +108,23 @@ async def start_ai_with_text_custom(user_text: str, state: Dict[str, Any], deps:
 
     orchestrator = get_orchestrator()
 
+    # ========== MCP/REST 目的地导航优先 ==========
+    # 例如“开始导航到松江印象城”包含“开始导航”，旧热词会误触发盲道导航。
+    # 先交给目的地导航 Agent；只有未处理时再走盲道/过马路等模式命令。
+    if not chat_mode_enabled:
+        try:
+            from navigation_agent import navigation_agent
+
+            handled_by_nav = await navigation_agent.handle_voice_text(user_text)
+            if handled_by_nav:
+                print(f"[MCP-NAV] 已接管语音指令: {user_text}", flush=True)
+                await ui_broadcast_final(f"[导航] {user_text}")
+                return
+        except Exception as e:
+            import traceback
+            print(f"[MCP-NAV] 处理语音指令失败: {e}", flush=True)
+            traceback.print_exc()
+
     # ========== Agent 意图识别（仅非 chat 模式） ==========
     if chat_mode_enabled:
         print(f"[CHAT] Chat 模式已启用，跳过 Agent，直接进入 omni 对话: {user_text}")

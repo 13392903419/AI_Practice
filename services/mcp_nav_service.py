@@ -105,6 +105,7 @@ class AmapRestProvider(NavigationProvider):
         if city_hint:
             params["city"] = city_hint
         try:
+            print(f"[MCP-NAV] geocode request: address={address}, city={city_hint or ''}", flush=True)
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 rsp = await client.get(self.GEOCODE_URL, params=params)
                 data = rsp.json()
@@ -116,7 +117,9 @@ class AmapRestProvider(NavigationProvider):
                 return None
             loc_str = geocodes[0].get("location", "")
             lon, lat = loc_str.split(",")
-            return float(lon), float(lat)
+            coord = (float(lon), float(lat))
+            print(f"[MCP-NAV] geocode ok: {address} -> {coord}", flush=True)
+            return coord
         except Exception as e:
             print(f"[MCP-NAV] geocode 异常: {e}")
             return None
@@ -136,6 +139,11 @@ class AmapRestProvider(NavigationProvider):
             "show_fields": "polyline",
         }
         try:
+            print(
+                f"[MCP-NAV] walking request: origin={params['origin']}, "
+                f"destination={params['destination']}",
+                flush=True,
+            )
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 rsp = await client.get(self.WALKING_URL, params=params)
                 data = rsp.json()
@@ -158,7 +166,7 @@ class AmapRestProvider(NavigationProvider):
                 )
                 for s in steps_raw
             ]
-            return RoutePlan(
+            plan = RoutePlan(
                 origin=origin,
                 destination=destination,
                 destination_text=destination_text,
@@ -166,6 +174,12 @@ class AmapRestProvider(NavigationProvider):
                 total_duration_s=int(path.get("cost", {}).get("duration", 0) or 0),
                 steps=steps,
             )
+            print(
+                f"[MCP-NAV] walking ok: distance={path.get('distance', 0)}m, "
+                f"steps={len(steps)}",
+                flush=True,
+            )
+            return plan
         except Exception as e:
             print(f"[MCP-NAV] route_walking 异常: {e}")
             return None

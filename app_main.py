@@ -820,6 +820,33 @@ async def set_pc_audio_mode(req: Request):
         "enableServerTtsSynth": enable_server_tts_synth,
     })
 
+
+@app.post("/api/location/update")
+async def update_phone_location(req: Request):
+    """接收手机端前台定位，用于 MCP/REST 实时导航起点和当前位置。"""
+    try:
+        data = await req.json()
+        lon = float(data.get("lon"))
+        lat = float(data.get("lat"))
+        accuracy = data.get("accuracy")
+        provider = data.get("provider", "phone")
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"invalid location payload: {e}"}, status_code=400)
+
+    try:
+        from navigation_agent import navigation_agent
+        navigation_agent.update_current_position(lon, lat)
+        print(
+            f"[LOCATION] phone update: lon={lon:.6f}, lat={lat:.6f}, "
+            f"accuracy={accuracy}, provider={provider}",
+            flush=True,
+        )
+    except Exception as e:
+        print(f"[LOCATION] update failed: {e}", flush=True)
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    return JSONResponse({"ok": True})
+
 # ---------- Agent API ----------
 # 全局 Agent 单例
 _agent_instance: SimpleAgent = None
