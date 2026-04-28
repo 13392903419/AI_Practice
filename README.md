@@ -25,6 +25,20 @@
 - 电脑端负责模型推理、TTS、ASR、状态机和服务端接口
 - 浏览器前端负责可视化、交互和状态展示
 
+### 1.1 当前版本更新重点
+
+当前版本在原有盲道导航、过街辅助、找物和多模态对话基础上，重点补齐了“目的地地图导航 + 本地视觉导航 + 声纹门控”的闭环：
+
+- 手机定位可实时上报到后端，电脑浏览器地图同步显示当前位置、经纬度和移动轨迹。
+- 支持通过高德地图 Web API 解析目的地并规划步行路线。
+- 用户说“帮我导航到某个地点”后，系统会自动提取目的地、规划路线，并更新前端导航地图。
+- 目的地导航启动成功后，会自动同步开启盲道导航模式，让地图路线和本地视觉导航同时工作。
+- 用户说“停止导航”或“取消导航”时，会统一停止目的地导航和本地盲道导航。
+- ASR final 文本进入导航 Agent 前会经过声纹门控，降低系统 TTS 回采后误触发命令的概率。
+- 停止/取消导航等紧急控制词会优先放行，避免关键时刻无法停止导航。
+
+面向队友的详细本地部署、声纹录入和测试流程见 [docs/team-testing-guide.md](docs/team-testing-guide.md)。
+
 ## 2. 功能概览
 
 ### 2.1 盲道导航
@@ -60,6 +74,28 @@
 - DashScope Paraformer 实时语音识别
 - 服务端统一调度 TTS 播报
 - 浏览器端和移动端可共享音频输入输出链路
+
+### 2.6 目的地地图导航
+
+- 基于高德地图 Web API 完成地址解析和步行路线规划
+- 手机端持续上报定位，后端维护当前起点、历史轨迹和导航状态
+- 前端地图展示当前位置、目的地、路线和导航状态
+- 语音输入“开始导航到...”或“帮我导航到...”后自动提取目的地
+- 目的地导航启动后自动联动盲道导航，形成地图路线 + 本地视觉的组合导航
+
+### 2.7 声纹门控
+
+- 使用 `resemblyzer` 提取说话人声纹特征
+- 通过 `enroll_voice.py` 录入用户声纹，生成 `model/voiceprint.npz`
+- 普通导航和 Agent 指令默认先过声纹校验
+- 非已录入声纹的语音会被拦截，减少系统播报被二次识别为用户命令的风险
+- 支持调试模式只打印声纹分数，不实际拦截
+
+### 2.8 统一停止导航
+
+- “停止导航”“取消导航”“结束导航”等指令会作为全局停止命令处理
+- 全局停止会同时结束目的地导航和盲道导航
+- 停止类紧急命令优先放行，不依赖普通声纹通过
 
 ## 3. 核心架构
 
@@ -101,6 +137,9 @@
 | 模块 | 主要文件 | 说明 |
 | --- | --- | --- |
 | 服务入口 | app_main.py | 服务、路由、初始化、帧流调度 |
+| 目的地导航 | navigation_agent.py | 目的地提取、路线状态、全局停止、本地导航联动 |
+| 高德导航服务 | services/mcp_nav_service.py | 地址解析、步行路线规划、导航提示生成 |
+| 导航接口 | services/api_navigation_routes.py | 导航启动、取消、状态查询和定位上报接口 |
 | 状态机 | navigation_master.py | 模式切换和主状态编排 |
 | 盲道导航 | workflow_blindpath.py | 盲道识别、路径引导、避障处理 |
 | 过街辅助 | workflow_crossstreet.py | 斑马线阶段和过街阶段引导 |
@@ -111,6 +150,8 @@
 | 云端对话 | omni_client.py | 云端多模态能力 |
 | 本地视觉问答 | local_qwen_client.py | 本地 Qwen2-VL 推理 |
 | 语音识别 | asr_core.py | 实时语音识别与回调管理 |
+| 声纹识别 | voiceprint.py | 机主声纹门控、最近音频缓存和分数判断 |
+| 声纹录入 | enroll_voice.py | 录制用户语音并保存声纹文件 |
 | 音频播放 | audio_player.py | 播放、TTS 和输出策略 |
 | 音频流 | audio_stream.py | 实时音频分发 |
 | 帧桥接 | bridge_io.py | 多线程帧缓冲 |
@@ -130,6 +171,7 @@
 | runs | 训练产物 |
 | test_results | 测试结果归档 |
 | docs | 额外文档 |
+| docs/team-testing-guide.md | 队友本地部署、声纹录入、手机联调和导航测试手册 |
 | PROJECT_STRUCTURE.md | 更细的目录结构说明 |
 
 ## 5. 环境要求
@@ -155,6 +197,9 @@
 若需要完整语音识别和云端多模态功能，至少需要：
 
 - DashScope API Key
+- 高德地图 Web 服务 Key（AMAP_API_KEY），用于目的地解析和步行路线规划
+
+若启用声纹门控，还需要安装 `resemblyzer`、`webrtcvad`、`librosa` 和 `sounddevice`。这些依赖已写入 requirements.txt。
 
 ## 6. 安装步骤
 
@@ -173,7 +218,8 @@ cd Blind_for_Navigation
 conda create -n blind_nav python=3.10 -y
 conda activate blind_nav
 conda install pytorch==2.0.1 torchvision==0.15.2 pytorch-cuda=11.8 -c pytorch -c nvidia
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
 如果使用 venv：
@@ -198,6 +244,7 @@ pip install -r requirements.txt
 | TRAFFIC_LIGHT_MODEL | model/trafficlight.pt | 红绿灯检测模型 |
 | SHOPPING_MODEL | model/shoppingbest5.pt | 找物模型 |
 | HAND_TASK_PATH | model/hand_landmarker.task | 手部关键点模型 |
+| VOICEPRINT_ENROLL_PATH | model/voiceprint.npz | 声纹录入文件，由 enroll_voice.py 生成 |
 
 如果启用本地 Qwen，还需要准备：
 
@@ -211,10 +258,13 @@ pip install -r requirements.txt
 
 ```env
 DASHSCOPE_API_KEY=your_dashscope_api_key
+AMAP_API_KEY=your_amap_web_service_key
+AMAP_PROVIDER=rest
+AMAP_HTTP_TIMEOUT=5.0
 
-RUNTIME_MODE=pc_standalone
-ACTIVE_VIDEO_SOURCE=pc
-ACTIVE_AUDIO_SOURCE=pc
+RUNTIME_MODE=phone_priority
+ACTIVE_VIDEO_SOURCE=phone
+ACTIVE_AUDIO_SOURCE=phone
 
 PC_MIC_AUTO_START=false
 PC_TTS_PLAYBACK_ENABLED=false
@@ -223,9 +273,19 @@ MOBILE_TEXT_TTS_ONLY=false
 STARTUP_ENABLE_AUDIO_TESTS=false
 STARTUP_PRELOAD_MODELS=true
 USE_LOCAL_QWEN=false
+WAKE_ENABLED=0
+
+VOICEPRINT_ENABLED=True
+VOICEPRINT_DEBUG_ONLY=False
+VOICEPRINT_ENROLL_PATH=model/voiceprint.npz
+VOICEPRINT_THRESHOLD=0.70
+VOICEPRINT_VERIFY_SEC=3.5
+VOICEPRINT_BUFFER_SEC=5.0
+VOICEPRINT_INPUT_SR=16000
 
 BLIND_PATH_MODEL=model/yolo-seg-nano.pt
 OBSTACLE_MODEL=model/yoloe-11l-seg.pt
+YOLOE_MODEL_PATH=model/yoloe-11l-seg.pt
 TRAFFIC_LIGHT_MODEL=model/trafficlight.pt
 SHOPPING_MODEL=model/shoppingbest5.pt
 HAND_TASK_PATH=model/hand_landmarker.task
@@ -242,6 +302,47 @@ HAND_TASK_PATH=model/hand_landmarker.task
 - STARTUP_ENABLE_AUDIO_TESTS：启动时是否执行音频测试。
 - STARTUP_PRELOAD_MODELS：启动时是否预加载模型。
 - USE_LOCAL_QWEN：是否启用本地 Qwen2-VL。
+- AMAP_API_KEY：高德地图 Web 服务 Key，用于地址解析和步行路线规划。
+- VOICEPRINT_ENABLED：是否启用声纹门控。
+- VOICEPRINT_DEBUG_ONLY：是否只打印声纹分数而不拦截命令。
+- VOICEPRINT_THRESHOLD：声纹相似度阈值，开发测试可先用 0.70。
+- VOICEPRINT_VERIFY_SEC：每次校验取最近多少秒音频，短句建议大于 2.5。
+
+### 8.1 声纹录入
+
+如果启用声纹门控，需要先录入用户声纹：
+
+```bash
+python enroll_voice.py --duration 10
+```
+
+录入成功后会生成：
+
+```text
+model/voiceprint.npz
+```
+
+录入时建议自然说 10 秒左右，不要只说一句很短的“小慧小慧启动”。示例：
+
+```text
+小慧小慧启动，我正在测试智能导航系统。请识别我的声音，之后只响应我的语音指令。开始导航、停止导航、帮我导航到目的地。
+```
+
+如果声纹分数偏低，可以先设置：
+
+```env
+VOICEPRINT_THRESHOLD=0.70
+VOICEPRINT_VERIFY_SEC=3.5
+VOICEPRINT_BUFFER_SEC=5.0
+```
+
+刚开始调试时，也可以设置：
+
+```env
+VOICEPRINT_DEBUG_ONLY=True
+```
+
+这样只打印声纹分数，不真实拦截命令。
 
 ## 9. 启动方式
 
@@ -294,7 +395,15 @@ start_project.bat
 - GET /api/agent/status：获取 Agent 和导航状态
 - POST /api/pc-audio-mode：切换服务端 TTS 合成策略
 
-### 10.3 摄像头与测试接口
+### 10.3 目的地导航与定位接口
+
+- POST /api/location/update：手机端定位上报，推荐使用
+- POST /api/location：兼容定位上报接口
+- POST /api/navigation/start：启动目的地导航
+- POST /api/navigation/cancel：取消目的地导航
+- GET /api/navigation/status：查询导航状态、路线、当前位置和历史轨迹
+
+### 10.4 摄像头与测试接口
 
 - POST /api/webcam/start
 - POST /api/webcam/stop
@@ -307,7 +416,7 @@ start_project.bat
 - GET /api/test/sync_log/{test_id}
 - GET /api/test/download/{test_id}
 
-### 10.4 WebSocket 接口
+### 10.5 WebSocket 接口
 
 - /ws_ui：状态和界面消息
 - /ws_audio：音频输入
@@ -321,6 +430,7 @@ start_project.bat
 
 - start_blindpath
 - stop_navigation
+- start_navigation
 - start_crossing
 - find_item
 - traffic_light
@@ -352,6 +462,8 @@ start_project.bat
 - ACTIVE_VIDEO_SOURCE=phone
 - ACTIVE_AUDIO_SOURCE=phone
 - 浏览器或移动端向服务端推送帧流和音频流
+- 手机端持续上报定位，电脑浏览器地图同步显示当前位置和轨迹
+- 可直接通过语音说“帮我导航到某地”启动目的地导航和盲道导航
 
 ### 12.3 本地多模态问答
 
@@ -368,10 +480,13 @@ start_project.bat
 整体数据流通常是：
 
 1. 浏览器打开主页并连接状态通道。
-2. 视频源通过 WebSocket 把帧发送到服务端。
-3. 服务端按当前模式执行导航、找物、识别或对话。
-4. 处理后的画面、文本状态和音频结果再回传给前端。
-5. 前端更新可视化画面、状态信息和交互控件。
+2. 手机或浏览器端授权摄像头、麦克风和定位。
+3. 视频源通过 WebSocket 把帧发送到服务端。
+4. 手机定位通过 /api/location/update 上报到服务端。
+5. 服务端按当前模式执行导航、找物、识别或对话。
+6. 目的地导航状态通过 /api/navigation/status 和 ws_ui 同步到前端。
+7. 处理后的画面、文本状态、地图状态和音频结果再回传给前端。
+8. 前端更新可视化画面、地图、状态信息和交互控件。
 
 ## 14. 调试建议
 
@@ -382,7 +497,9 @@ start_project.bat
 3. 确认 model 目录中关键模型文件存在。
 4. 访问 /api/health 检查服务是否正常启动。
 5. 访问 /api/runtime/config 检查运行模式和输入源配置。
-6. 检查浏览器控制台和服务端日志。
+6. 如果测试目的地导航，确认 AMAP_API_KEY 已配置且手机端已经上报定位。
+7. 如果测试声纹门控，确认 model/voiceprint.npz 已生成，且 resemblyzer 可正常导入。
+8. 检查浏览器控制台和服务端日志。
 
 高频问题包括：
 
@@ -391,6 +508,11 @@ start_project.bat
 - 启用了 USE_LOCAL_QWEN 但本地模型目录未准备好。
 - 只安装了 requirements.txt，却没有安装匹配 CUDA 的 PyTorch。
 - 端口 8081 被其他进程占用。
+- 缺少 AMAP_API_KEY，导致目的地无法解析或路线规划失败。
+- 未录入声纹或声纹阈值过高，导致 ASR final 被 `[VOICEPRINT][REJECT]` 拦截。
+- 手机浏览器没有定位权限，导致前端地图和导航起点无法实时更新。
+
+更完整的队友测试流程和排错说明见 [docs/team-testing-guide.md](docs/team-testing-guide.md)。
 
 ## 15. 维护建议
 
@@ -402,6 +524,10 @@ start_project.bat
 - workflow_blindpath.py：盲道导航主流程
 - workflow_crossstreet.py：过街流程
 - yolomedia.py：找物流程
+- navigation_agent.py：目的地导航和地图路线状态
+- services/mcp_nav_service.py：高德地图 Web API 调用
+- voiceprint.py / enroll_voice.py：声纹门控和录入流程
+- docs/team-testing-guide.md：队友部署、配置、测试和排错手册
 
 ## 16. 安全声明
 
