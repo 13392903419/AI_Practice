@@ -167,6 +167,12 @@
     text-align: center;
   }
 
+  .route-map-svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
   .route-foot {
     display: flex;
     justify-content: space-between;
@@ -220,6 +226,19 @@
     height: 100%;
     display: block;
     background: #000;
+  }
+
+  #canvasHint {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+    font-size: 16px;
+    pointer-events: none;
+    text-align: center;
+    padding: 20px;
   }
 
   /* 右上角状态浮窗 */
@@ -550,9 +569,9 @@
           <span class="page-subtitle">当前位置与目的地状态</span>
         </div>
         <div class="location-tools">
-          <button class="ghost" type="button">定位我的位置</button>
-          <input type="text" placeholder="输入目的地..." aria-label="输入目的地">
-          <button class="primary" type="button">搜索</button>
+          <button class="ghost" id="btnLocate" type="button">定位我的位置</button>
+          <input id="destinationInput" type="text" placeholder="输入目的地..." aria-label="输入目的地">
+          <button class="primary" id="btnSearchRoute" type="button">搜索</button>
         </div>
       </div>
       <div class="location-body">
@@ -587,7 +606,7 @@
       </div>
       <div class="canvas-wrap">
         <canvas id="canvas"></canvas>
-        <div id="canvasHint" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:16px;pointer-events:none;text-align:center;padding:20px">正在启动电脑摄像头…</div>
+        <div id="canvasHint">正在启动电脑摄像头…</div>
       </div>
 
       <!-- 右上角状态浮窗 -->

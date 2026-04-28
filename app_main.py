@@ -134,6 +134,7 @@ from services.vision_pipeline_service import (
 )
 from services.api_agent_routes import register_agent_routes
 from services.api_runtime_routes import register_runtime_routes
+from services.api_navigation_routes import register_navigation_routes
 
 # ---- 同步录制器 ----
 import sync_recorder
@@ -901,6 +902,8 @@ def _register_split_api_routes():
         },
     )
 
+    register_navigation_routes(app)
+
 
 
 _register_split_api_routes()
@@ -969,32 +972,6 @@ async def webcam_status():
         "active": webcam_active,
         "camera_info": webcam_handler.get_camera_info() if webcam_active else None
     }
-
-
-# ============== MCP 导航：手机端定位上报 ==============
-@app.post("/api/location")
-async def report_location(payload: dict):
-    """手机端定位上报。请求体：{"lon": 121.5, "lat": 31.2}
-
-    前端可用 navigator.geolocation.watchPosition 周期上报。
-    坐标系建议为 WGS84，调用 高德 API 时由 navigation_service 内部按需转换。
-    """
-    try:
-        lon = float(payload.get("lon"))
-        lat = float(payload.get("lat"))
-    except (TypeError, ValueError):
-        return {"ok": False, "error": "invalid lon/lat"}
-
-    from navigation_agent import navigation_agent
-    navigation_agent.update_current_position(lon, lat)
-    return {"ok": True, "nav_active": navigation_agent.is_active()}
-
-
-@app.get("/api/navigation/status")
-async def navigation_status():
-    """查询当前 MCP 导航是否激活，便于前端显示状态。"""
-    from navigation_agent import navigation_agent
-    return {"active": navigation_agent.is_active()}
 
 
 @app.post("/api/webcam/capture")

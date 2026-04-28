@@ -28,7 +28,7 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from audio_scheduler import audio_scheduler, Channel, Priority
 from intent_recognizer import recognize_intent, Intent
@@ -53,6 +53,9 @@ class NavigationAgent:
         self._current_pos: Optional[Tuple[float, float]] = None
         self._pos_ts: float = 0.0
         self._default_origin_logged = False
+        self._last_plan: Optional[RoutePlan] = None
+        self._last_destination_text: str = ""
+        self._last_error: str = ""
 
     # ---------- 位置源 ----------
     def update_current_position(self, lon: float, lat: float) -> None:
@@ -112,14 +115,31 @@ class NavigationAgent:
             return True
         return False
 
+    async def start_navigation(self, destination_text: str) -> Dict[str, Any]:
+        """供 Web/API 直接启动导航。"""
+        destination = (destination_text or "").strip()
+        if not destination:
+            return {"ok": False, "error": "destination is required", "status": self.get_status()}
+        await self._start_navigation(destination)
+        status = self.get_status()
+        return {"ok": not bool(status.get("error")), "error": status.get("error", ""), "status": status}
+
+    async def cancel_navigation(self, reason: str = "api_cancel") -> Dict[str, Any]:
+        await self._cancel_navigation(reason=reason)
+        return {"ok": True, "status": self.get_status()}
+
     # ---------- 启动导航 ----------
     async def _start_navigation(self, destination_text: str) -> None:
         print(f"[NAV-AGENT] start navigation: {destination_text}", flush=True)
+        self._last_destination_text = destination_text
+        self._last_error = ""
+        self._last_plan = None
         # 先取消旧 session
         await self._cancel_navigation(reason="restart", silent=True)
 
         origin = await self._wait_for_position(float(os.getenv("MCP_NAV_WAIT_POSITION_SEC", "5.0")))
         if origin is None:
+            self._last_error = "暂时无法获取当前位置，请确认浏览器已授权定位。"
             print("[NAV-AGENT] 缺少当前位置，无法规划 REST 导航", flush=True)
             audio_scheduler.speak(
                 "暂时无法获取你的位置，请确认手机已授权定位。",
@@ -139,6 +159,10 @@ class NavigationAgent:
         print(f"[NAV-AGENT] planning REST route: origin={origin}, destination={destination_text}", flush=True)
         plan = await navigation_service.plan_route(origin, destination_text)
         if plan is None or not plan.steps:
+            if not os.getenv("AMAP_API_KEY", "").strip():
+                self._last_error = "缺少 AMAP_API_KEY，无法规划路线。"
+            else:
+                self._last_error = f"未能规划到{destination_text}的路线。"
             print(f"[NAV-AGENT] route plan failed: destination={destination_text}", flush=True)
             audio_scheduler.speak(
                 f"未能规划到{destination_text}的路线，请换个说法或检查网络。",
@@ -147,6 +171,7 @@ class NavigationAgent:
                 preempt=True,
             )
             return
+        self._last_plan = plan
         print(
             f"[NAV-AGENT] route ready: distance={plan.total_distance_m}m, "
             f"duration={plan.total_duration_s}s, steps={len(plan.steps)}",
@@ -242,6 +267,63 @@ class NavigationAgent:
     # ---------- 状态查询 ----------
     def is_active(self) -> bool:
         return self._session is not None
+
+    def get_status(self) -> Dict[str, Any]:
+        session = self._session
+        plan = session.plan if session else self._last_plan
+        elapsed_s = int(time.time() - session.started_at) if session else 0
+        position_age_s = int(time.time() - self._pos_ts) if self._current_pos else None
+        return {
+            "active": session is not None,
+            "destination_text": plan.destination_text if plan else self._last_destination_text,
+            "error": self._last_error,
+            "elapsed_s": elapsed_s,
+            "position": {
+                "lon": self._current_pos[0],
+                "lat": self._current_pos[1],
+                "age_s": position_age_s,
+            } if self._current_pos else None,
+            "plan": self._serialize_plan(plan) if plan else None,
+        }
+
+    def _serialize_plan(self, plan: RoutePlan) -> Dict[str, Any]:
+        route_points = self._collect_route_points(plan)
+        return {
+            "origin": {"lon": plan.origin[0], "lat": plan.origin[1]},
+            "destination": {"lon": plan.destination[0], "lat": plan.destination[1]},
+            "destination_text": plan.destination_text,
+            "total_distance_m": plan.total_distance_m,
+            "total_duration_s": plan.total_duration_s,
+            "route_points": route_points,
+            "steps": [
+                {
+                    "instruction": step.instruction,
+                    "distance_m": step.distance_m,
+                    "duration_s": step.duration_s,
+                    "action": step.action,
+                }
+                for step in plan.steps
+            ],
+        }
+
+    def _collect_route_points(self, plan: RoutePlan) -> List[Dict[str, float]]:
+        points: List[Dict[str, float]] = [{"lon": plan.origin[0], "lat": plan.origin[1]}]
+        for step in plan.steps:
+            for raw_point in step.polyline.split(";"):
+                raw_point = raw_point.strip()
+                if not raw_point:
+                    continue
+                try:
+                    lon_text, lat_text = raw_point.split(",", 1)
+                    lon = float(lon_text)
+                    lat = float(lat_text)
+                except (TypeError, ValueError):
+                    continue
+                if not points or points[-1]["lon"] != lon or points[-1]["lat"] != lat:
+                    points.append({"lon": lon, "lat": lat})
+        if not points or points[-1]["lon"] != plan.destination[0] or points[-1]["lat"] != plan.destination[1]:
+            points.append({"lon": plan.destination[0], "lat": plan.destination[1]})
+        return points
 
 
 # 全局单例

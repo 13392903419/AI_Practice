@@ -23,6 +23,15 @@ document.addEventListener('click', function _unlockAudio() {
   const $btnPcTts  = document.getElementById('btnPcTts');
   const $btnWebcam = document.getElementById('btnWebcam');
   const $fps       = document.getElementById('fps');
+  const $btnLocate = document.getElementById('btnLocate');
+  const $destinationInput = document.getElementById('destinationInput');
+  const $btnSearchRoute = document.getElementById('btnSearchRoute');
+  const $currentLocationText = document.getElementById('currentLocationText');
+  const $destinationText = document.getElementById('destinationText');
+  const $routeStatusText = document.getElementById('routeStatusText');
+  const $routePreview = document.getElementById('routePreview');
+  const $routeDistanceText = document.getElementById('routeDistanceText');
+  const $routeEtaText = document.getElementById('routeEtaText');
   const canvas     = document.getElementById('canvas');
   const ctx        = canvas.getContext('2d');
 
@@ -228,6 +237,184 @@ document.addEventListener('click', function _unlockAudio() {
     const isCross = crossHints.some(k => t.includes(k));
     const label = isCross ? '【斑马线导航】' : '【盲道导航】';
     return { label, text: `${label} ${t}` };
+  }
+
+  function formatDistance(meters) {
+    const value = Number(meters || 0);
+    if (!value) return '--';
+    return value >= 1000 ? `${(value / 1000).toFixed(1)} 公里` : `${Math.round(value)} 米`;
+  }
+
+  function formatDuration(seconds) {
+    const value = Number(seconds || 0);
+    if (!value) return '--';
+    const minutes = Math.max(1, Math.round(value / 60));
+    return `${minutes} 分钟`;
+  }
+
+  function drawRoutePreview(points) {
+    if (!$routePreview) return;
+    if (!points || points.length < 2) {
+      $routePreview.textContent = '路线信息将在定位和规划完成后显示';
+      return;
+    }
+
+    const width = Math.max(320, $routePreview.clientWidth || 520);
+    const height = Math.max(220, $routePreview.clientHeight || 260);
+    const padding = 24;
+    const lons = points.map(p => Number(p.lon)).filter(Number.isFinite);
+    const lats = points.map(p => Number(p.lat)).filter(Number.isFinite);
+    const minLon = Math.min(...lons);
+    const maxLon = Math.max(...lons);
+    const minLat = Math.min(...lats);
+    const maxLat = Math.max(...lats);
+    const lonSpan = Math.max(maxLon - minLon, 0.00001);
+    const latSpan = Math.max(maxLat - minLat, 0.00001);
+    const scale = Math.min((width - padding * 2) / lonSpan, (height - padding * 2) / latSpan);
+    const routeWidth = lonSpan * scale;
+    const routeHeight = latSpan * scale;
+    const offsetX = (width - routeWidth) / 2;
+    const offsetY = (height - routeHeight) / 2;
+
+    const toPoint = p => {
+      const x = offsetX + (Number(p.lon) - minLon) * scale;
+      const y = height - offsetY - (Number(p.lat) - minLat) * scale;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    };
+    const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${toPoint(p)}`).join(' ');
+    const start = toPoint(points[0]);
+    const end = toPoint(points[points.length - 1]);
+
+    $routePreview.innerHTML = `
+      <svg class="route-map-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="导航路线预览">
+        <rect width="${width}" height="${height}" fill="#f5f1e8"></rect>
+        <path d="${path}" fill="none" stroke="#d4cfc5" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"></path>
+        <path d="${path}" fill="none" stroke="#e85d04" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"></path>
+        <circle cx="${start.split(',')[0]}" cy="${start.split(',')[1]}" r="8" fill="#4A7C59"></circle>
+        <circle cx="${end.split(',')[0]}" cy="${end.split(',')[1]}" r="8" fill="#C5453A"></circle>
+      </svg>
+    `;
+  }
+
+  function drawLocationPreview(position) {
+    if (!$routePreview) return;
+    if (!position) {
+      $routePreview.textContent = '路线信息将在定位和规划完成后显示';
+      return;
+    }
+    const width = Math.max(320, $routePreview.clientWidth || 520);
+    const height = Math.max(220, $routePreview.clientHeight || 260);
+    const centerX = width / 2;
+    const centerY = height / 2;
+    $routePreview.innerHTML = `
+      <svg class="route-map-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="当前位置预览">
+        <rect width="${width}" height="${height}" fill="#f5f1e8"></rect>
+        <path d="M 0 ${centerY} H ${width} M ${centerX} 0 V ${height}" stroke="#d4cfc5" stroke-width="1" stroke-dasharray="6 8"></path>
+        <circle cx="${centerX}" cy="${centerY}" r="18" fill="#4A7C59" opacity="0.16"></circle>
+        <circle cx="${centerX}" cy="${centerY}" r="8" fill="#4A7C59"></circle>
+        <text x="${centerX}" y="${centerY + 34}" text-anchor="middle" fill="#6B6560" font-size="13">当前位置</text>
+      </svg>
+    `;
+  }
+
+  function renderNavigationStatus(status) {
+    if (!status) return;
+    const position = status.position;
+    const plan = status.plan;
+    if ($currentLocationText) {
+      $currentLocationText.textContent = position
+        ? `${position.lat.toFixed(6)}, ${position.lon.toFixed(6)}${Number.isFinite(position.age_s) ? ` · ${position.age_s}s前` : ''}`
+        : '等待定位...';
+    }
+    if ($destinationText) {
+      $destinationText.textContent = status.destination_text || '尚未设置';
+    }
+    if ($routeStatusText) {
+      $routeStatusText.textContent = status.error || (status.active ? '导航进行中' : (plan ? '路线已规划' : '等待导航指令'));
+    }
+    if ($routeDistanceText) {
+      $routeDistanceText.textContent = `距离: ${plan ? formatDistance(plan.total_distance_m) : '--'}`;
+    }
+    if ($routeEtaText) {
+      $routeEtaText.textContent = `预计: ${plan ? formatDuration(plan.total_duration_s) : '--'}`;
+    }
+    if (plan) {
+      drawRoutePreview(plan.route_points);
+    } else {
+      drawLocationPreview(position);
+    }
+  }
+
+  async function fetchNavigationStatus() {
+    try {
+      const response = await fetch('/api/navigation/status');
+      if (!response.ok) return;
+      renderNavigationStatus(await response.json());
+    } catch (e) {
+      console.warn('[Navigation] 状态获取失败:', e);
+    }
+  }
+
+  async function submitLocation(position) {
+    const coords = position.coords;
+    const payload = {
+      lon: coords.longitude,
+      lat: coords.latitude,
+      accuracy: coords.accuracy,
+      provider: 'browser'
+    };
+    const response = await fetch('/api/location', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) throw new Error(`定位上报失败: ${response.status}`);
+    const data = await response.json();
+    renderNavigationStatus(data.status || data);
+  }
+
+  function locateOnce() {
+    if (!navigator.geolocation) {
+      if ($routeStatusText) $routeStatusText.textContent = '当前浏览器不支持定位';
+      return;
+    }
+    if ($routeStatusText) $routeStatusText.textContent = '正在获取当前位置...';
+    navigator.geolocation.getCurrentPosition(
+      position => submitLocation(position).catch(e => {
+        console.error('[Navigation] 定位上报失败:', e);
+        if ($routeStatusText) $routeStatusText.textContent = e.message;
+      }),
+      error => {
+        console.warn('[Navigation] 浏览器定位失败:', error);
+        if ($routeStatusText) $routeStatusText.textContent = `定位失败: ${error.message}`;
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 }
+    );
+  }
+
+  async function startRouteSearch() {
+    const destination = ($destinationInput && $destinationInput.value || '').trim();
+    if (!destination) {
+      if ($routeStatusText) $routeStatusText.textContent = '请输入目的地';
+      return;
+    }
+    if ($destinationText) $destinationText.textContent = destination;
+    if ($routeStatusText) $routeStatusText.textContent = '正在规划路线...';
+    try {
+      const response = await fetch('/api/navigation/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ destination })
+      });
+      const data = await response.json();
+      renderNavigationStatus(data.status || data);
+      if (!response.ok || data.ok === false) {
+        throw new Error(data.error || '路线规划失败');
+      }
+    } catch (e) {
+      console.error('[Navigation] 路线规划失败:', e);
+      if ($routeStatusText) $routeStatusText.textContent = e.message;
+    }
   }
 
   function fitCanvas(){
@@ -527,6 +714,20 @@ document.addEventListener('click', function _unlockAudio() {
     };
   }
 
+  if ($btnLocate) {
+    $btnLocate.onclick = locateOnce;
+  }
+
+  if ($btnSearchRoute) {
+    $btnSearchRoute.onclick = startRouteSearch;
+  }
+
+  if ($destinationInput) {
+    $destinationInput.addEventListener('keydown', event => {
+      if (event.key === 'Enter') startRouteSearch();
+    });
+  }
+
   // ===== 电脑摄像头：浏览器推帧到服务器 /ws/camera =====
   let webcamActive = false;
   let cameraStream = null;
@@ -613,6 +814,8 @@ document.addEventListener('click', function _unlockAudio() {
     // 页面加载时：仅连接画面订阅和 ASR，不自动开启本机摄像头
     connectCamera();
     connectASR();
+    fetchNavigationStatus();
+    setInterval(fetchNavigationStatus, 5000);
   }
 
   initPage();
