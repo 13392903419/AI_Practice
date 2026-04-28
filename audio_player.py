@@ -296,6 +296,12 @@ async def _broadcast_audio_optimized(pcm_data: bytes):
             audio_b64 = base64.b64encode(wav_bytes).decode('ascii')
             _tts_audio_callback(audio_b64, "wav")
             _last_play_ts = time.monotonic()
+            duration_sec = len(pcm_data) / float(8000 * 2)
+            print(
+                f"[AUDIO] 已推送预录音到浏览器/手机 ({len(wav_bytes)} bytes, {duration_sec:.2f}s)",
+                flush=True,
+            )
+            await asyncio.sleep(max(0.12, duration_sec + 0.05))
             return
         except Exception as e:
             print(f"[AUDIO] 浏览器推送失败: {e}，回退到本地播放")
@@ -413,7 +419,6 @@ def initialize_audio_system():
 
 def _drain_queue_preserve_critical():
     """清空队列，但保留 critical 项；返回是否发生过清理。"""
-    global _audio_queue
     preserved = []
     try:
         while True:
@@ -422,13 +427,12 @@ def _drain_queue_preserve_critical():
                 preserved.append(item)
     except queue.Empty:
         pass
-    new_q = queue.PriorityQueue(maxsize=10)
+
     for it in preserved:
         try:
-            new_q.put_nowait(it)
+            _audio_queue.put_nowait(it)
         except queue.Full:
             break
-    _audio_queue = new_q
     return preserved
 
 
