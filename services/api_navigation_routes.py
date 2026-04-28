@@ -12,7 +12,12 @@ def register_navigation_routes(app):
 
         from navigation_agent import navigation_agent
 
-        navigation_agent.update_current_position(lon, lat)
+        navigation_agent.update_current_position(
+            lon,
+            lat,
+            accuracy=payload.get("accuracy"),
+            provider=str(payload.get("provider", "browser")),
+        )
         return {"ok": True, "status": navigation_agent.get_status()}
 
     @app.post("/api/navigation/start")

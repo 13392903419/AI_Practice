@@ -564,6 +564,80 @@ def stop_yolomedia():
 
         print("[YOLOMEDIA] Worker stop signal sent, 等待状态切换.", flush=True)
 
+
+def ensure_navigation_orchestrator() -> bool:
+    """确保视觉导航状态机已初始化，供语音导航自动联动盲道模式使用。"""
+    global blind_path_navigator, cross_street_navigator, orchestrator
+
+    if blind_path_navigator is None and yolo_seg_model is not None:
+        blind_path_navigator = BlindPathNavigator(yolo_seg_model, obstacle_detector)
+
+    if cross_street_navigator is None and yolo_seg_model is not None:
+        cross_street_navigator = CrossStreetNavigator(
+            seg_model=yolo_seg_model,
+            obs_model=None,
+        )
+
+    if orchestrator is None and blind_path_navigator is not None and cross_street_navigator is not None:
+        orchestrator = NavigationMaster(blind_path_navigator, cross_street_navigator)
+
+    return orchestrator is not None
+
+
+def start_local_navigation_for_destination(destination_text: str = "") -> bool:
+    if not ensure_navigation_orchestrator():
+        print(f"[NAV-AGENT] local navigation not ready for destination={destination_text}", flush=True)
+        return False
+
+    if yolomedia_running:
+        stop_yolomedia()
+
+    prev_state = orchestrator.get_state()
+    orchestrator.start_blind_path_navigation()
+    print(
+        f"[NAV-AGENT] visual navigation state: {prev_state} -> {orchestrator.get_state()} "
+        f"destination={destination_text}",
+        flush=True,
+    )
+    return True
+
+
+def get_local_navigation_state():
+    return orchestrator.get_state() if orchestrator is not None else None
+
+
+def stop_all_navigation_modes(reason: str = "") -> bool:
+    """停止目的地导航之外的本地导航/检测状态，用作全局停止指令。"""
+    stopped = False
+
+    try:
+        if yolomedia_running:
+            stop_yolomedia()
+            stopped = True
+    except Exception as e:
+        print(f"[GLOBAL-STOP] stop_yolomedia failed: {e}", flush=True)
+
+    try:
+        if orchestrator is not None:
+            prev_state = orchestrator.get_state()
+            if prev_state not in ("CHAT", "IDLE"):
+                orchestrator.stop_navigation()
+                stopped = True
+                print(f"[GLOBAL-STOP] local navigation stopped: {prev_state} -> {orchestrator.get_state()} reason={reason}", flush=True)
+    except Exception as e:
+        print(f"[GLOBAL-STOP] orchestrator stop failed: {e}", flush=True)
+
+    return stopped
+
+
+try:
+    from navigation_agent import navigation_agent
+    navigation_agent.set_global_stop_handler(stop_all_navigation_modes)
+    navigation_agent.set_local_start_handler(start_local_navigation_for_destination)
+    navigation_agent.set_local_state_provider(get_local_navigation_state)
+except Exception as e:
+    print(f"[NAV-AGENT] register local/global handlers failed: {e}", flush=True)
+
 # ========= 自定义的 start_ai_with_text，支持识别特殊命令 ==========
 # 全局变量：Chat 模式是否启用
 chat_mode_enabled = False
@@ -619,6 +693,7 @@ async def start_ai_with_text_custom(user_text: str):
         from navigation_agent import navigation_agent
         if await navigation_agent.handle_voice_text(user_text):
             print(f"[NAV-AGENT] 已接管语音指令: {user_text}", flush=True)
+            await ui_broadcast_raw("NAV_STATUS:" + json.dumps(navigation_agent.get_status(), ensure_ascii=False))
             return
     except Exception as e:
         print(f"[NAV-AGENT] handle_voice_text 异常，回退默认 Agent: {e}", flush=True)
@@ -856,7 +931,7 @@ async def update_phone_location(req: Request):
 
     try:
         from navigation_agent import navigation_agent
-        navigation_agent.update_current_position(lon, lat)
+        navigation_agent.update_current_position(lon, lat, accuracy=accuracy, provider=provider)
         print(
             f"[LOCATION] phone update: lon={lon:.6f}, lat={lat:.6f}, "
             f"accuracy={accuracy}, provider={provider}",
@@ -866,7 +941,7 @@ async def update_phone_location(req: Request):
         print(f"[LOCATION] update failed: {e}", flush=True)
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
-    return JSONResponse({"ok": True})
+    return JSONResponse({"ok": True, "status": navigation_agent.get_status()})
 
 # ---------- Agent API ----------
 # 全局 Agent 单例

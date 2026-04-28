@@ -19,7 +19,25 @@ def register_agent_routes(app, deps: Dict[str, Callable[..., Any]]):
         try:
             from simple_agent import AgentRequest
 
+            try:
+                from navigation_agent import navigation_agent
+
+                if await navigation_agent.handle_voice_text(user_input):
+                    orchestrator = get_orchestrator()
+                    return {
+                        "success": True,
+                        "response": "已处理导航指令。",
+                        "intent": "navigation",
+                        "tool_used": "navigation_agent",
+                        "state": orchestrator.get_state() if orchestrator else None,
+                    }
+            except Exception as e:
+                print(f"[AGENT] navigation_agent intercept failed: {e}")
+
             agent = get_agent_instance()
+            orchestrator = get_orchestrator()
+            if orchestrator:
+                agent.tool_executor.set_nav_master(orchestrator)
             agent_request = AgentRequest(user_input=user_input, input_type=input_type)
             response = await agent.process(agent_request)
 

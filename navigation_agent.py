@@ -25,10 +25,12 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 from audio_scheduler import audio_scheduler, Channel, Priority
 from intent_recognizer import recognize_intent, Intent
@@ -51,18 +53,52 @@ class NavigationAgent:
         self._session: Optional[_NavSession] = None
         self._session_lock = asyncio.Lock()
         self._current_pos: Optional[Tuple[float, float]] = None
+        self._pos_accuracy: Optional[float] = None
+        self._pos_provider: str = ""
         self._pos_ts: float = 0.0
+        self._position_history: Deque[Dict[str, Any]] = deque(maxlen=120)
         self._default_origin_logged = False
         self._last_plan: Optional[RoutePlan] = None
         self._last_destination_text: str = ""
         self._last_error: str = ""
+        self._global_stop_handler: Optional[Callable[[str], Any]] = None
+        self._local_start_handler: Optional[Callable[[str], Any]] = None
+        self._local_state_provider: Optional[Callable[[], Any]] = None
+
+    def set_global_stop_handler(self, handler: Optional[Callable[[str], Any]]) -> None:
+        self._global_stop_handler = handler
+
+    def set_local_start_handler(self, handler: Optional[Callable[[str], Any]]) -> None:
+        self._local_start_handler = handler
+
+    def set_local_state_provider(self, provider: Optional[Callable[[], Any]]) -> None:
+        self._local_state_provider = provider
 
     # ---------- 位置源 ----------
-    def update_current_position(self, lon: float, lat: float) -> None:
+    def update_current_position(
+        self,
+        lon: float,
+        lat: float,
+        accuracy: Optional[float] = None,
+        provider: str = "phone",
+    ) -> None:
         """由 app_main 路由（手机定位上报）调用。"""
         try:
-            self._current_pos = (float(lon), float(lat))
+            lon_value = float(lon)
+            lat_value = float(lat)
+            self._current_pos = (lon_value, lat_value)
+            self._pos_accuracy = float(accuracy) if accuracy is not None else None
+            self._pos_provider = provider or "phone"
             self._pos_ts = time.time()
+            self._position_history.append(
+                {
+                    "lon": lon_value,
+                    "lat": lat_value,
+                    "accuracy": self._pos_accuracy,
+                    "provider": self._pos_provider,
+                    "ts": self._pos_ts,
+                }
+            )
         except (TypeError, ValueError):
             pass
 
@@ -128,6 +164,30 @@ class NavigationAgent:
         await self._cancel_navigation(reason=reason)
         return {"ok": True, "status": self.get_status()}
 
+    async def _run_global_stop_handler(self, reason: str) -> bool:
+        if self._global_stop_handler is None:
+            return False
+        try:
+            result = self._global_stop_handler(reason)
+            if inspect.isawaitable(result):
+                result = await result
+            return bool(result)
+        except Exception as e:
+            print(f"[NAV-AGENT] global stop handler failed: {e}", flush=True)
+            return False
+
+    async def _run_local_start_handler(self, destination_text: str) -> bool:
+        if self._local_start_handler is None:
+            return False
+        try:
+            result = self._local_start_handler(destination_text)
+            if inspect.isawaitable(result):
+                result = await result
+            return bool(result)
+        except Exception as e:
+            print(f"[NAV-AGENT] local start handler failed: {e}", flush=True)
+            return False
+
     # ---------- 启动导航 ----------
     async def _start_navigation(self, destination_text: str) -> None:
         print(f"[NAV-AGENT] start navigation: {destination_text}", flush=True)
@@ -180,6 +240,9 @@ class NavigationAgent:
 
         # 激活导航互斥：盲道直行类提示自动压制
         audio_scheduler.set_navigation_active(True)
+        local_started = await self._run_local_start_handler(destination_text)
+        if local_started:
+            print(f"[NAV-AGENT] local blindpath navigation started for: {destination_text}", flush=True)
 
         async with self._session_lock:
             session = _NavSession(plan=plan)
@@ -216,11 +279,20 @@ class NavigationAgent:
 
     # ---------- 取消导航 ----------
     async def _cancel_navigation(self, reason: str = "", silent: bool = False) -> None:
+        stopped_local_modes = await self._run_global_stop_handler(reason or "cancel_navigation")
         async with self._session_lock:
             session = self._session
             self._session = None
         if session is None:
-            if not silent:
+            audio_scheduler.set_navigation_active(False)
+            if stopped_local_modes and not silent:
+                audio_scheduler.speak(
+                    "导航已停止。",
+                    channel=Channel.MCP_NAV,
+                    priority=Priority.NAV_CRITICAL,
+                    preempt=True,
+                )
+            elif not silent:
                 audio_scheduler.speak(
                     "当前没有进行中的导航。",
                     channel=Channel.MCP_NAV,
@@ -237,7 +309,7 @@ class NavigationAgent:
         audio_scheduler.set_navigation_active(False)
         if not silent:
             audio_scheduler.speak(
-                "导航已取消。",
+                "导航已停止。",
                 channel=Channel.MCP_NAV,
                 priority=Priority.NAV_CRITICAL,
                 preempt=True,
@@ -281,10 +353,38 @@ class NavigationAgent:
             "position": {
                 "lon": self._current_pos[0],
                 "lat": self._current_pos[1],
+                "accuracy": self._pos_accuracy,
+                "provider": self._pos_provider,
                 "age_s": position_age_s,
             } if self._current_pos else None,
+            "position_history": self._serialize_position_history(),
+            "local_navigation_state": self._get_local_navigation_state(),
             "plan": self._serialize_plan(plan) if plan else None,
         }
+
+    def _get_local_navigation_state(self) -> Optional[str]:
+        if self._local_state_provider is None:
+            return None
+        try:
+            state = self._local_state_provider()
+            return str(state) if state is not None else None
+        except Exception:
+            return None
+
+    def _serialize_position_history(self) -> List[Dict[str, Any]]:
+        now = time.time()
+        points: List[Dict[str, Any]] = []
+        for item in self._position_history:
+            points.append(
+                {
+                    "lon": item["lon"],
+                    "lat": item["lat"],
+                    "accuracy": item.get("accuracy"),
+                    "provider": item.get("provider", ""),
+                    "age_s": int(now - item["ts"]),
+                }
+            )
+        return points
 
     def _serialize_plan(self, plan: RoutePlan) -> Dict[str, Any]:
         route_points = self._collect_route_points(plan)

@@ -252,18 +252,14 @@ document.addEventListener('click', function _unlockAudio() {
     return `${minutes} 分钟`;
   }
 
-  function drawRoutePreview(points) {
-    if (!$routePreview) return;
-    if (!points || points.length < 2) {
-      $routePreview.textContent = '路线信息将在定位和规划完成后显示';
-      return;
-    }
+  function validPoint(point) {
+    return point && Number.isFinite(Number(point.lon)) && Number.isFinite(Number(point.lat));
+  }
 
-    const width = Math.max(320, $routePreview.clientWidth || 520);
-    const height = Math.max(220, $routePreview.clientHeight || 260);
-    const padding = 24;
-    const lons = points.map(p => Number(p.lon)).filter(Number.isFinite);
-    const lats = points.map(p => Number(p.lat)).filter(Number.isFinite);
+  function buildProjector(points, width, height, padding) {
+    const validPoints = points.filter(validPoint);
+    const lons = validPoints.map(p => Number(p.lon));
+    const lats = validPoints.map(p => Number(p.lat));
     const minLon = Math.min(...lons);
     const maxLon = Math.max(...lons);
     const minLat = Math.min(...lats);
@@ -275,28 +271,57 @@ document.addEventListener('click', function _unlockAudio() {
     const routeHeight = latSpan * scale;
     const offsetX = (width - routeWidth) / 2;
     const offsetY = (height - routeHeight) / 2;
-
-    const toPoint = p => {
-      const x = offsetX + (Number(p.lon) - minLon) * scale;
-      const y = height - offsetY - (Number(p.lat) - minLat) * scale;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    return point => {
+      const x = offsetX + (Number(point.lon) - minLon) * scale;
+      const y = height - offsetY - (Number(point.lat) - minLat) * scale;
+      return { x, y, text: `${x.toFixed(1)},${y.toFixed(1)}` };
     };
-    const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${toPoint(p)}`).join(' ');
-    const start = toPoint(points[0]);
-    const end = toPoint(points[points.length - 1]);
+  }
+
+  function pathFromPoints(points, project) {
+    return points.filter(validPoint).map((point, index) => {
+      return `${index === 0 ? 'M' : 'L'} ${project(point).text}`;
+    }).join(' ');
+  }
+
+  function drawRoutePreview(points, position, history) {
+    if (!$routePreview) return;
+    if (!points || points.length < 2) {
+      $routePreview.textContent = '路线信息将在定位和规划完成后显示';
+      return;
+    }
+
+    const width = Math.max(320, $routePreview.clientWidth || 520);
+    const height = Math.max(220, $routePreview.clientHeight || 260);
+    const padding = 24;
+    const historyPoints = Array.isArray(history) ? history.filter(validPoint) : [];
+    const projectorPoints = [...points, ...historyPoints, position].filter(validPoint);
+    const project = buildProjector(projectorPoints, width, height, padding);
+    const path = pathFromPoints(points, project);
+    const trackPath = pathFromPoints(historyPoints, project);
+    const start = project(points[0]);
+    const end = project(points[points.length - 1]);
+    const current = validPoint(position) ? project(position) : null;
+    const currentMarker = current ? `
+        <circle cx="${current.x.toFixed(1)}" cy="${current.y.toFixed(1)}" r="16" fill="#2563eb" opacity="0.16"></circle>
+        <circle cx="${current.x.toFixed(1)}" cy="${current.y.toFixed(1)}" r="7" fill="#2563eb" stroke="#f5f1e8" stroke-width="3"></circle>
+        <text x="${current.x.toFixed(1)}" y="${(current.y - 18).toFixed(1)}" text-anchor="middle" fill="#1f3f8b" font-size="12">当前位置</text>` : '';
+    const trackLine = trackPath ? `<path d="${trackPath}" fill="none" stroke="#2563eb" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="2 8" opacity="0.72"></path>` : '';
 
     $routePreview.innerHTML = `
       <svg class="route-map-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="导航路线预览">
         <rect width="${width}" height="${height}" fill="#f5f1e8"></rect>
         <path d="${path}" fill="none" stroke="#d4cfc5" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"></path>
         <path d="${path}" fill="none" stroke="#e85d04" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"></path>
-        <circle cx="${start.split(',')[0]}" cy="${start.split(',')[1]}" r="8" fill="#4A7C59"></circle>
-        <circle cx="${end.split(',')[0]}" cy="${end.split(',')[1]}" r="8" fill="#C5453A"></circle>
+        ${trackLine}
+        <circle cx="${start.x.toFixed(1)}" cy="${start.y.toFixed(1)}" r="8" fill="#4A7C59"></circle>
+        <circle cx="${end.x.toFixed(1)}" cy="${end.y.toFixed(1)}" r="8" fill="#C5453A"></circle>
+        ${currentMarker}
       </svg>
     `;
   }
 
-  function drawLocationPreview(position) {
+  function drawLocationPreview(position, history) {
     if (!$routePreview) return;
     if (!position) {
       $routePreview.textContent = '路线信息将在定位和规划完成后显示';
@@ -304,15 +329,21 @@ document.addEventListener('click', function _unlockAudio() {
     }
     const width = Math.max(320, $routePreview.clientWidth || 520);
     const height = Math.max(220, $routePreview.clientHeight || 260);
-    const centerX = width / 2;
-    const centerY = height / 2;
+    const padding = 32;
+    const historyPoints = Array.isArray(history) ? history.filter(validPoint) : [];
+    const projectorPoints = [...historyPoints, position].filter(validPoint);
+    const project = buildProjector(projectorPoints, width, height, padding);
+    const current = project(position);
+    const trackPath = pathFromPoints(historyPoints, project);
+    const trackLine = trackPath ? `<path d="${trackPath}" fill="none" stroke="#2563eb" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" opacity="0.72"></path>` : '';
     $routePreview.innerHTML = `
       <svg class="route-map-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="当前位置预览">
         <rect width="${width}" height="${height}" fill="#f5f1e8"></rect>
-        <path d="M 0 ${centerY} H ${width} M ${centerX} 0 V ${height}" stroke="#d4cfc5" stroke-width="1" stroke-dasharray="6 8"></path>
-        <circle cx="${centerX}" cy="${centerY}" r="18" fill="#4A7C59" opacity="0.16"></circle>
-        <circle cx="${centerX}" cy="${centerY}" r="8" fill="#4A7C59"></circle>
-        <text x="${centerX}" y="${centerY + 34}" text-anchor="middle" fill="#6B6560" font-size="13">当前位置</text>
+        <path d="M 0 ${height / 2} H ${width} M ${width / 2} 0 V ${height}" stroke="#d4cfc5" stroke-width="1" stroke-dasharray="6 8"></path>
+        ${trackLine}
+        <circle cx="${current.x.toFixed(1)}" cy="${current.y.toFixed(1)}" r="18" fill="#2563eb" opacity="0.16"></circle>
+        <circle cx="${current.x.toFixed(1)}" cy="${current.y.toFixed(1)}" r="8" fill="#2563eb" stroke="#f5f1e8" stroke-width="3"></circle>
+        <text x="${current.x.toFixed(1)}" y="${(current.y + 34).toFixed(1)}" text-anchor="middle" fill="#6B6560" font-size="13">当前位置</text>
       </svg>
     `;
   }
@@ -320,17 +351,24 @@ document.addEventListener('click', function _unlockAudio() {
   function renderNavigationStatus(status) {
     if (!status) return;
     const position = status.position;
+    const history = status.position_history || [];
     const plan = status.plan;
+    const localState = status.local_navigation_state;
     if ($currentLocationText) {
       $currentLocationText.textContent = position
-        ? `${position.lat.toFixed(6)}, ${position.lon.toFixed(6)}${Number.isFinite(position.age_s) ? ` · ${position.age_s}s前` : ''}`
+        ? `${position.lat.toFixed(6)}, ${position.lon.toFixed(6)}${position.provider ? ` · ${position.provider}` : ''}${Number.isFinite(position.accuracy) ? ` · ±${Math.round(position.accuracy)}m` : ''}${Number.isFinite(position.age_s) ? ` · ${position.age_s}s前` : ''}`
         : '等待定位...';
     }
     if ($destinationText) {
       $destinationText.textContent = status.destination_text || '尚未设置';
     }
     if ($routeStatusText) {
-      $routeStatusText.textContent = status.error || (status.active ? '导航进行中' : (plan ? '路线已规划' : '等待导航指令'));
+      const stateParts = [];
+      if (status.active) stateParts.push('目的地导航中');
+      else if (plan) stateParts.push('路线已规划');
+      if (localState === 'BLINDPATH_NAV') stateParts.push('盲道识别中');
+      else if (localState && !['CHAT', 'IDLE'].includes(localState)) stateParts.push(localState);
+      $routeStatusText.textContent = status.error || (stateParts.length ? stateParts.join(' · ') : '等待导航指令');
     }
     if ($routeDistanceText) {
       $routeDistanceText.textContent = `距离: ${plan ? formatDistance(plan.total_distance_m) : '--'}`;
@@ -339,19 +377,25 @@ document.addEventListener('click', function _unlockAudio() {
       $routeEtaText.textContent = `预计: ${plan ? formatDuration(plan.total_duration_s) : '--'}`;
     }
     if (plan) {
-      drawRoutePreview(plan.route_points);
+      drawRoutePreview(plan.route_points, position, history);
     } else {
-      drawLocationPreview(position);
+      drawLocationPreview(position, history);
     }
   }
 
+  let navStatusLoading = false;
+
   async function fetchNavigationStatus() {
+    if (navStatusLoading) return;
+    navStatusLoading = true;
     try {
-      const response = await fetch('/api/navigation/status');
+      const response = await fetch('/api/navigation/status', { cache: 'no-store' });
       if (!response.ok) return;
       renderNavigationStatus(await response.json());
     } catch (e) {
       console.warn('[Navigation] 状态获取失败:', e);
+    } finally {
+      navStatusLoading = false;
     }
   }
 
@@ -596,6 +640,14 @@ document.addEventListener('click', function _unlockAudio() {
     wsUI.onerror = ()=> setBadge($asrStatus, false, 'ASR: error');
     wsUI.onmessage = (ev)=>{
       const s = ev.data || '';
+      if (s.startsWith('NAV_STATUS:')){
+        try {
+          renderNavigationStatus(JSON.parse(s.slice(11)));
+        } catch(e) {
+          console.warn('[Navigation] 状态推送解析失败:', e);
+        }
+        return;
+      }
       if (s.startsWith('INIT:')){
         try{
           const data = JSON.parse(s.slice(5));
@@ -815,7 +867,7 @@ document.addEventListener('click', function _unlockAudio() {
     connectCamera();
     connectASR();
     fetchNavigationStatus();
-    setInterval(fetchNavigationStatus, 5000);
+    setInterval(fetchNavigationStatus, 1000);
   }
 
   initPage();
