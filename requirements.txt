@@ -39,6 +39,7 @@ qwen-vl-utils>=0.0.1             # Qwen 视觉工具
 pydub==0.25.1
 pygame==2.5.2
 sounddevice==0.4.6
+resemblyzer>=0.1.4               # 声纹识别（机主声纹门控）
 websocket-client==1.6.4
 requests>=2.31.0
 edge-tts>=7.2.0                  # 微软免费 TTS
