@@ -1,64 +1,65 @@
 # ========================================
-# AI Glass System - Python Dependencies
-# 智能盲人导航眼镜系统
-# Python: 3.10 - 3.11
-# CUDA: 11.8
+# Blind Navigation System - Python Dependencies
+# 智能盲人导航系统
+# Python: 3.10.19
+# CUDA: 11.8 (torch.version.cuda)
 # ========================================
 
+# PyTorch CUDA 11.8 wheels
+--extra-index-url https://download.pytorch.org/whl/cu118
+
 # ==================== Web 框架 ====================
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
+fastapi==0.135.2
+uvicorn[standard]==0.42.0
 websockets==12.0
-python-multipart==0.0.6
-starlette==0.27.0
+python-multipart==0.0.22
+starlette==1.0.0
 
 # ==================== 计算机视觉与深度学习 ====================
+torch==2.7.1+cu118
+torchvision==0.22.1+cu118
 opencv-python==4.8.1.78
 opencv-contrib-python==4.8.1.78
 numpy==1.24.3
-Pillow==10.1.0                    # ✅ 新增：图像处理（被多个模块使用）
+Pillow==12.1.1
 ultralytics==8.3.200
-lap>=0.5.12
+lap==0.5.13
 
 # ==================== YOLO-E 依赖 ====================
 clip-anytorch==2.6.0
-setuptools==68.2.2               # clip-anytorch 需要 pkg_resources
-
-# ==================== PyTorch ====================
-# GPU (CUDA 11.8): conda install pytorch==2.0.1 torchvision==0.15.2 pytorch-cuda=11.8 -c pytorch -c nvidia
+setuptools==68.2.2
 
 # ==================== MediaPipe ====================
 mediapipe==0.10.8
 
-# ==================== Qwen 本地模型（新增）====================
-transformers>=4.37.0             # Qwen2VL 模型加载
-accelerate>=0.26.0               # transformers device_map 支持
-qwen-vl-utils>=0.0.1             # Qwen 视觉工具
+# ==================== Qwen 本地模型 ====================
+transformers==5.4.0
+accelerate==1.13.0
+qwen-vl-utils==0.0.14
 
 # ==================== 音频处理 ====================
 pydub==0.25.1
 pygame==2.5.2
-sounddevice==0.4.6
-resemblyzer>=0.1.4               # 声纹识别（机主声纹门控）
-websocket-client==1.6.4
-requests>=2.31.0
-edge-tts>=7.2.0                  # 微软免费 TTS
+sounddevice==0.5.5
+resemblyzer==0.1.4
+websocket-client==1.9.0
+requests==2.32.5
+edge-tts==7.2.8
 
 # ==================== 阿里云服务 ====================
-dashscope==1.14.1                # ASR & Qwen-Omni
-openai==1.3.5                    # DashScope 兼容模式
-httpx>=0.23.0,<0.28              # openai 1.3.5 兼容要求
+dashscope==1.25.15
+openai==2.24.0
+httpx==0.28.1
 
 # ==================== 配置管理 ====================
-python-dotenv==1.0.0
+python-dotenv==1.2.2
 
 # ==================== 可选性能优化 ====================
-# 取消注释以启用：
-# onnxruntime-gpu==1.16.3        # ONNX 模型加速
-# tensorrt==8.6.1                # TensorRT 优化
+# onnxruntime-gpu 当前环境未安装
+# tensorrt 当前环境未安装
 
 # ==================== 开发工具（可选）====================
-# pytest==7.4.3
-# pytest-asyncio==0.21.1
-# black==23.11.0
-# flake8==6.1.0
+# pytest 当前环境未安装
+# pytest-asyncio 当前环境未安装
+# black 当前环境未安装
+# flake8 当前环境未安装
