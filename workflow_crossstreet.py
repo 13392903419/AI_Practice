@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 STATE_SEEKING = "SEEKING_CROSSWALK"      # 寻找并对准远处的斑马线
 STATE_WAIT_LIGHT = "WAIT_TRAFFIC_LIGHT"  # 等待红绿灯判定
 STATE_CROSSING = "CROSSING"              # 正在过马路
+CROSSING_END_GUIDANCE = "过马路结束，准备上人行道。"
 
 # ========== 配置参数 ==========
 CROSSWALK_MIN_CONF = float(os.getenv('CROSSWALK_MIN_CONF', '0.3'))
@@ -1826,7 +1827,7 @@ class CrossStreetNavigator:
                             self.last_guide_time = current_time
                         # 优先级2：过马路结束提示（斑马线快消失）
                         elif is_almost_done and not self.crossing_end_announced:
-                            guidance_text = "过马路结束，准备上人行道。"
+                            guidance_text = CROSSING_END_GUIDANCE
                             self.crossing_end_announced = True
                             self.last_guide_time = current_time
                         # 优先级3：盲道提示（过马路结束后检测到盲道，可重复播报但节流4秒）
@@ -1866,7 +1867,7 @@ class CrossStreetNavigator:
                                     self.last_guide_time = current_time
                                 # 优先级2：过马路结束
                                 else:
-                                    guidance_text = "过马路结束，准备上人行道。"
+                                    guidance_text = CROSSING_END_GUIDANCE
                                     self.crossing_end_announced = True
                                     self.last_guide_time = current_time
                         # 播报结束后，检测到盲道则重复播报（节流3秒）
@@ -1904,7 +1905,7 @@ class CrossStreetNavigator:
                 annotated_image=annotated,
                 guidance_text=guidance_text,
                 visualizations=frame_visualizations,
-                should_switch_to_blindpath=False
+                should_switch_to_blindpath=(guidance_text == CROSSING_END_GUIDANCE)
             )
 
         except Exception as e:

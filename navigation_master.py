@@ -23,6 +23,7 @@ SEEKING_NEXT_BLINDPATH = "SEEKING_NEXT_BLINDPATH" # 过完马路后寻找下一�
 RECOVERY = "RECOVERY"                  # 兜底/恢复（感知暂时丢失时）
 TRAFFIC_LIGHT_DETECTION = "TRAFFIC_LIGHT_DETECTION"  # 红绿灯检测模式
 ITEM_SEARCH = "ITEM_SEARCH"            # 找物品模式（暂停导航，由yolomedia处理画面）
+CROSSING_END_GUIDANCE = "过马路结束，准备上人行道。"
 
 # ========== 返回结构 ==========
 @dataclass
@@ -394,6 +395,19 @@ class NavigationMaster:
             return text
         return ""
 
+    def _switch_to_blindpath_after_crossing(self, now: float):
+        self.state = BLINDPATH_NAV
+        self.cooldown_until = now + self.COOLDOWN_SEC
+        self.cnt_cross_end = 0
+        try:
+            self.blind.reset()
+        except Exception:
+            pass
+        try:
+            self.cross.reset()
+        except Exception:
+            pass
+
     def _draw_tl_status(self, img: np.ndarray, color: str, meta: Dict[str, Any]):
         if img is None:
             return
@@ -601,6 +615,10 @@ class NavigationMaster:
             ann = cres.annotated_image if cres.annotated_image is not None else bgr.copy()
             say = cres.guidance_text or ""
 
+            if say == CROSSING_END_GUIDANCE:
+                self._switch_to_blindpath_after_crossing(now)
+                return OrchestratorResult(ann, self._say(now, say), self.state, {"source": "cross", "auto_switch": "crossing_end_guidance"})
+
             # 新增：检查是否检测到盲道
             blind_path_detected = getattr(cres, 'blind_path_detected', False)
             blind_path_guidance = getattr(cres, 'blind_path_guidance', "")
@@ -633,9 +651,8 @@ class NavigationMaster:
             self.cnt_cross_end = self.cnt_cross_end + 1 if end_hint else max(0, self.cnt_cross_end - 1)
 
             if self.cnt_cross_end >= self.FRAMES_CROSS_END and not in_cooldown:
-                self.state = SEEKING_NEXT_BLINDPATH
-                self.cooldown_until = now + self.COOLDOWN_SEC
-                say = "过马路结束，准备上人行道。"
+                self._switch_to_blindpath_after_crossing(now)
+                say = CROSSING_END_GUIDANCE
 
             
             return OrchestratorResult(ann, self._say(now, say), self.state, {"source": "cross", "end_cnt": self.cnt_cross_end})
