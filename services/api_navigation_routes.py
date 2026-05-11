@@ -20,6 +20,26 @@ def register_navigation_routes(app):
         )
         return {"ok": True, "status": navigation_agent.get_status()}
 
+    @app.post("/api/orientation")
+    async def report_orientation(payload: Dict[str, Any]):
+        try:
+            heading = float(payload.get("heading"))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "invalid heading"}
+
+        from navigation_agent import navigation_agent
+
+        navigation_agent.update_phone_heading(
+            heading,
+            accuracy=payload.get("accuracy"),
+            provider=str(payload.get("provider", "device_orientation")),
+        )
+        return {"ok": True, "status": navigation_agent.get_status()}
+
+    @app.post("/api/orientation/update")
+    async def report_orientation_update(payload: Dict[str, Any]):
+        return await report_orientation(payload)
+
     @app.post("/api/navigation/start")
     async def start_navigation(payload: Dict[str, Any]):
         destination = str(payload.get("destination", "")).strip()

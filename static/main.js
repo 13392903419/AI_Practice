@@ -598,6 +598,76 @@ document.addEventListener('click', function _unlockAudio() {
     renderNavigationStatus(data.status || data);
   }
 
+  let orientationStarted = false;
+  let lastOrientationPostAt = 0;
+  let orientationFirstUploadLogged = false;
+
+  function extractCompassHeading(event) {
+    if (Number.isFinite(event.webkitCompassHeading)) {
+      return Number(event.webkitCompassHeading);
+    }
+    if (Number.isFinite(event.alpha)) {
+      return (360 - Number(event.alpha)) % 360;
+    }
+    return null;
+  }
+
+  async function submitOrientation(heading, accuracy) {
+    const response = await fetch('/api/orientation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        heading,
+        accuracy: Number.isFinite(accuracy) ? accuracy : null,
+        provider: 'device_orientation'
+      })
+    });
+    if (!response.ok) throw new Error(`朝向上报失败: ${response.status}`);
+  }
+
+  function handleDeviceOrientation(event) {
+    const heading = extractCompassHeading(event);
+    if (!Number.isFinite(heading)) return;
+    const now = Date.now();
+    if (now - lastOrientationPostAt < 500) return;
+    lastOrientationPostAt = now;
+    if (!orientationFirstUploadLogged) {
+      orientationFirstUploadLogged = true;
+      console.info('[Navigation] 首次朝向上报:', heading);
+    }
+    submitOrientation(heading, event.webkitCompassAccuracy).catch(e => {
+      console.warn('[Navigation] 朝向上报失败:', e);
+    });
+  }
+
+  function attachOrientationListeners() {
+    window.addEventListener('deviceorientationabsolute', handleDeviceOrientation, true);
+    window.addEventListener('deviceorientation', handleDeviceOrientation, true);
+  }
+
+  async function startOrientationUpdates() {
+    if (orientationStarted) return;
+    if (!window.DeviceOrientationEvent) {
+      console.warn('[Navigation] 当前浏览器不支持 DeviceOrientationEvent');
+      return;
+    }
+    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+      try {
+        const permission = await DeviceOrientationEvent.requestPermission();
+        if (permission !== 'granted') {
+          console.warn('[Navigation] 方向传感器权限未授权:', permission);
+          return;
+        }
+      } catch (e) {
+        console.warn('[Navigation] 方向传感器权限请求失败:', e);
+        return;
+      }
+    }
+    orientationStarted = true;
+    attachOrientationListeners();
+    console.info('[Navigation] 方向传感器监听已启动');
+  }
+
   function locateOnce() {
     if (!navigator.geolocation) {
       if ($routeStatusText) $routeStatusText.textContent = '当前浏览器不支持定位';
@@ -1047,6 +1117,8 @@ document.addEventListener('click', function _unlockAudio() {
     await loadClientConfig();
     renderPcAudioButtons();
     await setServerTtsSynthMode(pcTtsPlaybackEnabled);
+    startOrientationUpdates();
+    document.addEventListener('click', startOrientationUpdates, { once: true });
     // 页面加载时：仅连接画面订阅和 ASR，不自动开启本机摄像头
     connectCamera();
     connectASR();

@@ -76,6 +76,10 @@ def _clean_destination(dest: str) -> str:
     if not dest:
         return ""
     d = dest.strip().strip("，。！？,.!?")
+    for marker in ("全程约", "预计", "的路线"):
+        marker_idx = d.find(marker)
+        if marker_idx > 0:
+            d = d[:marker_idx].strip().strip("，。！？,.!?")
     # 反复剥离尾部赘词
     changed = True
     while changed:

@@ -725,7 +725,10 @@ async def start_ai_with_text_custom(user_text: str):
     try:
         from navigation_agent import navigation_agent
         if await navigation_agent.handle_voice_text(user_text):
-            print(f"[NAV-AGENT] 已接管语音指令: {user_text}", flush=True)
+            if getattr(navigation_agent, "_last_handle_was_echo", False):
+                print(f"[NAV-AGENT] 已忽略导航播报回采: {user_text}", flush=True)
+            else:
+                print(f"[NAV-AGENT] 已接管语音指令: {user_text}", flush=True)
             await ui_broadcast_raw("NAV_STATUS:" + json.dumps(navigation_agent.get_status(), ensure_ascii=False))
             return
     except Exception as e:

@@ -215,6 +215,111 @@ def _haversine_m(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     return 2 * 6371000.0 * math.asin(math.sqrt(h))
 
 
+def _bearing_deg(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+    lon1, lat1, lon2, lat2 = map(math.radians, (a[0], a[1], b[0], b[1]))
+    delta_lon = lon2 - lon1
+    x_value = math.sin(delta_lon) * math.cos(lat2)
+    y_value = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(delta_lon)
+    return (math.degrees(math.atan2(x_value, y_value)) + 360.0) % 360.0
+
+
+def _signed_delta_deg(target_deg: float, current_deg: float) -> float:
+    return (target_deg - current_deg + 540.0) % 360.0 - 180.0
+
+
+def _relative_direction_text(relative_deg: float) -> str:
+    if -15.0 <= relative_deg <= 15.0:
+        return "向前"
+    if 15.0 < relative_deg <= 45.0:
+        return "向右前"
+    if -45.0 <= relative_deg < -15.0:
+        return "向左前"
+    if 45.0 < relative_deg <= 120.0:
+        return "向右转"
+    if -120.0 <= relative_deg < -45.0:
+        return "向左转"
+    return "掉头"
+
+
+def _instruction_direction_bearing(instruction: str) -> Optional[float]:
+    direction_bearings = {
+        "正北": 0.0,
+        "东北": 45.0,
+        "正东": 90.0,
+        "东南": 135.0,
+        "正南": 180.0,
+        "西南": 225.0,
+        "正西": 270.0,
+        "西北": 315.0,
+        "北": 0.0,
+        "东": 90.0,
+        "南": 180.0,
+        "西": 270.0,
+    }
+    text = instruction or ""
+    for direction in ("正北", "东北", "正东", "东南", "正南", "西南", "正西", "西北", "北", "东", "南", "西"):
+        if f"向{direction}" in text or f"往{direction}" in text or f"朝{direction}" in text:
+            return direction_bearings[direction]
+    return None
+
+
+def _parse_polyline_points(polyline: str) -> List[Tuple[float, float]]:
+    points: List[Tuple[float, float]] = []
+    for raw_point in (polyline or "").split(";"):
+        raw_point = raw_point.strip()
+        if not raw_point:
+            continue
+        try:
+            lon_text, lat_text = raw_point.split(",", 1)
+            points.append((float(lon_text), float(lat_text)))
+        except (TypeError, ValueError):
+            continue
+    return points
+
+
+def _step_target_point(
+    position: Tuple[float, float],
+    polyline: str,
+    fallback: Tuple[float, float],
+    min_distance_m: float = 3.0,
+) -> Tuple[float, float]:
+    for point in _parse_polyline_points(polyline):
+        if _haversine_m(position, point) >= min_distance_m:
+            return point
+    return fallback
+
+
+def _relative_guidance_text(
+    position: Tuple[float, float],
+    user_heading_deg: float,
+    step: RouteStep,
+    step_end: Tuple[float, float],
+) -> str:
+    route_bearing = _instruction_direction_bearing(step.instruction)
+    if route_bearing is None:
+        route_bearing = _bearing_deg(position, _step_target_point(position, step.polyline, step_end))
+    relative_deg = _signed_delta_deg(route_bearing, user_heading_deg)
+    direction_text = _relative_direction_text(relative_deg)
+    distance_text = f"约{step.distance_m}米" if step.distance_m > 0 else "一段距离"
+    if direction_text in ("向前", "向左前", "向右前"):
+        return f"{direction_text}，前进{distance_text}。"
+    if direction_text == "掉头":
+        return f"请掉头，前进{distance_text}。"
+    return f"{direction_text}，再前进{distance_text}。"
+
+
+def _fallback_guidance_text(step: RouteStep) -> str:
+    distance_text = f"约{step.distance_m}米" if step.distance_m > 0 else "一段距离"
+    action = (step.action or step.instruction or "").strip()
+    if "左转" in action:
+        return f"向左转，再前进{distance_text}。"
+    if "右转" in action:
+        return f"向右转，再前进{distance_text}。"
+    if "掉头" in action or "调头" in action:
+        return f"请掉头，前进{distance_text}。"
+    return f"向前，前进{distance_text}。"
+
+
 class NavigationService:
     """对外门面：路线规划 + 实时步骤播报。"""
 
@@ -243,6 +348,7 @@ class NavigationService:
         self,
         plan: RoutePlan,
         get_current_pos: Callable[[], Awaitable[Optional[Tuple[float, float]]]],
+        get_current_heading: Optional[Callable[[], Awaitable[Optional[float]]]] = None,
         arrival_threshold_m: float = 15.0,
         poll_interval_s: float = 2.0,
     ) -> AsyncIterator[LiveGuidance]:
@@ -280,9 +386,16 @@ class NavigationService:
                 except Exception:
                     step_end = plan.destination
 
+            pos = await get_current_pos()
+            user_heading = await get_current_heading() if get_current_heading is not None else None
+            if pos is not None and user_heading is not None:
+                instruction_text = _relative_guidance_text(pos, user_heading, step, step_end)
+            else:
+                instruction_text = _fallback_guidance_text(step)
+
             # 进入新步骤先播报指令
             yield LiveGuidance(
-                guidance_text=step.instruction or f"前进{step.distance_m}米",
+                guidance_text=instruction_text,
                 priority=Priority.NAV_CRITICAL,
                 step_index=idx,
             )

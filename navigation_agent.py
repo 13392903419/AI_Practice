@@ -48,6 +48,21 @@ class _NavSession:
     cancelled: bool = False
 
 
+def _looks_like_navigation_tts_echo(text: str) -> bool:
+    normalized = (text or "").strip().strip("，。！？,.!? ")
+    if not normalized:
+        return False
+    if normalized.startswith("为你导航到") and ("全程约" in normalized or "预计" in normalized):
+        return True
+    if normalized.startswith("正在为你规划到") and "路线" in normalized:
+        return True
+    if normalized.startswith("未能规划到") and "路线" in normalized:
+        return True
+    if normalized.startswith("已到达") and "导航结束" in normalized:
+        return True
+    return False
+
+
 class NavigationAgent:
     def __init__(self) -> None:
         self._session: Optional[_NavSession] = None
@@ -56,11 +71,17 @@ class NavigationAgent:
         self._pos_accuracy: Optional[float] = None
         self._pos_provider: str = ""
         self._pos_ts: float = 0.0
+        self._phone_heading: Optional[float] = None
+        self._phone_heading_accuracy: Optional[float] = None
+        self._phone_heading_provider: str = ""
+        self._phone_heading_ts: float = 0.0
+        self._phone_heading_log_ts: float = 0.0
         self._position_history: Deque[Dict[str, Any]] = deque(maxlen=120)
         self._default_origin_logged = False
         self._last_plan: Optional[RoutePlan] = None
         self._last_destination_text: str = ""
         self._last_error: str = ""
+        self._last_handle_was_echo = False
         self._global_stop_handler: Optional[Callable[[str], Any]] = None
         self._local_start_handler: Optional[Callable[[str], Any]] = None
         self._local_state_provider: Optional[Callable[[], Any]] = None
@@ -102,6 +123,36 @@ class NavigationAgent:
         except (TypeError, ValueError):
             pass
 
+    def update_phone_heading(
+        self,
+        heading: float,
+        accuracy: Optional[float] = None,
+        provider: str = "device_orientation",
+    ) -> None:
+        try:
+            heading_value = float(heading) % 360.0
+            self._phone_heading = heading_value
+            self._phone_heading_accuracy = float(accuracy) if accuracy is not None else None
+            self._phone_heading_provider = provider or "device_orientation"
+            self._phone_heading_ts = time.time()
+            if self._phone_heading_ts - self._phone_heading_log_ts >= 5.0:
+                self._phone_heading_log_ts = self._phone_heading_ts
+                print(
+                    f"[ORIENTATION] phone heading update: phone={heading_value:.1f}, "
+                    f"user={(heading_value + float(os.getenv('PHONE_HEADING_OFFSET_DEG', '90'))) % 360.0:.1f}, "
+                    f"accuracy={self._phone_heading_accuracy}, provider={self._phone_heading_provider}",
+                    flush=True,
+                )
+        except (TypeError, ValueError):
+            pass
+
+    async def _get_user_heading(self) -> Optional[float]:
+        max_age_sec = float(os.getenv("PHONE_HEADING_MAX_AGE_SEC", "10"))
+        if self._phone_heading is None or (time.time() - self._phone_heading_ts) > max_age_sec:
+            return None
+        offset_deg = float(os.getenv("PHONE_HEADING_OFFSET_DEG", "90"))
+        return (self._phone_heading + offset_deg) % 360.0
+
     async def _get_position(self) -> Optional[Tuple[float, float]]:
         # 超过 30s 未更新视为失效
         max_age_sec = float(os.getenv("MCP_NAV_POSITION_MAX_AGE_SEC", "120"))
@@ -134,6 +185,12 @@ class NavigationAgent:
     # ---------- 入口：语音文本 ----------
     async def handle_voice_text(self, text: str) -> bool:
         """处理 ASR final 文本。返回 True 表示已处理（不需走默认 Agent）。"""
+        self._last_handle_was_echo = False
+        if _looks_like_navigation_tts_echo(text):
+            self._last_handle_was_echo = True
+            print(f"[NAV-AGENT] ignore navigation TTS echo: {text}", flush=True)
+            return True
+
         result = recognize_intent(text)
         print(
             f"[NAV-AGENT] intent={result.intent}, destination={result.destination}, "
@@ -270,11 +327,15 @@ class NavigationAgent:
             async for guidance in navigation_service.live_steps(
                 session.plan,
                 self._get_position,
+                self._get_user_heading,
             ):
                 if session.cancelled:
                     return
-                # 关键步骤抢占播放
-                preempt = guidance.priority >= Priority.NAV_CRITICAL
+                preempt = guidance.is_arrival or (guidance.step_index > 0 and guidance.priority >= Priority.NAV_CRITICAL)
+                print(
+                    f"[NAV-AGENT] dispatch guidance step={guidance.step_index}: {guidance.guidance_text}",
+                    flush=True,
+                )
                 audio_scheduler.speak(
                     guidance.guidance_text,
                     channel=Channel.MCP_NAV,
@@ -377,8 +438,26 @@ class NavigationAgent:
                 "age_s": position_age_s,
             } if self._current_pos else None,
             "position_history": self._serialize_position_history(),
+            "orientation": self._serialize_orientation(),
             "local_navigation_state": self._get_local_navigation_state(),
             "plan": self._serialize_plan(plan) if plan else None,
+        }
+
+    def _serialize_orientation(self) -> Optional[Dict[str, Any]]:
+        if self._phone_heading is None:
+            return None
+        now = time.time()
+        offset_deg = float(os.getenv("PHONE_HEADING_OFFSET_DEG", "90"))
+        age_s = int(now - self._phone_heading_ts)
+        max_age_sec = float(os.getenv("PHONE_HEADING_MAX_AGE_SEC", "10"))
+        return {
+            "phone_heading": self._phone_heading,
+            "user_heading": (self._phone_heading + offset_deg) % 360.0,
+            "offset_deg": offset_deg,
+            "accuracy": self._phone_heading_accuracy,
+            "provider": self._phone_heading_provider,
+            "age_s": age_s,
+            "valid": age_s <= max_age_sec,
         }
 
     def _get_local_navigation_state(self) -> Optional[str]:
