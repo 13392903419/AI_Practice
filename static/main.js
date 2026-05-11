@@ -34,6 +34,19 @@ document.addEventListener('click', function _unlockAudio() {
   const $routeEtaText = document.getElementById('routeEtaText');
   const canvas     = document.getElementById('canvas');
   const ctx        = canvas.getContext('2d');
+  const clientConfig = {
+    amapJsApiKey: '',
+    amapJsApiKeyConfigured: false,
+    amapSecurityJsCode: ''
+  };
+  let amapSdkPromise = null;
+  let amapMap = null;
+  let amapRouteLine = null;
+  let amapTrackLine = null;
+  let amapCurrentMarker = null;
+  let amapStartMarker = null;
+  let amapEndMarker = null;
+  let amapRenderSeq = 0;
 
   // === 获取/创建聊天容器（关键补丁） ===
   let chatContainer = document.getElementById('chatContainer');
@@ -256,6 +269,139 @@ document.addEventListener('click', function _unlockAudio() {
     return point && Number.isFinite(Number(point.lon)) && Number.isFinite(Number(point.lat));
   }
 
+  function toAmapLngLat(point) {
+    return [Number(point.lon), Number(point.lat)];
+  }
+
+  function getValidPath(points) {
+    return Array.isArray(points) ? points.filter(validPoint).map(toAmapLngLat) : [];
+  }
+
+  function resetRoutePreviewClass() {
+    if ($routePreview) $routePreview.classList.remove('amap-ready');
+  }
+
+  function showMapNotice(message) {
+    if ($routeStatusText) $routeStatusText.textContent = message;
+    if ($routePreview && !amapMap) {
+      resetRoutePreviewClass();
+      $routePreview.textContent = message;
+    }
+  }
+
+  function loadAmapSdk() {
+    if (window.AMap) return Promise.resolve(window.AMap);
+    if (amapSdkPromise) return amapSdkPromise;
+    if (!clientConfig.amapJsApiKey) {
+      return Promise.reject(new Error('缺少 AMAP_JS_API_KEY，请在 .env 配置高德 Web端(JS API) Key'));
+    }
+    if (clientConfig.amapSecurityJsCode) {
+      window._AMapSecurityConfig = { securityJsCode: clientConfig.amapSecurityJsCode };
+    }
+    amapSdkPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(clientConfig.amapJsApiKey)}&plugin=AMap.Scale,AMap.ToolBar`;
+      script.async = true;
+      script.onload = () => window.AMap ? resolve(window.AMap) : reject(new Error('高德地图 SDK 未正确加载'));
+      script.onerror = () => reject(new Error('高德地图 SDK 加载失败'));
+      document.head.appendChild(script);
+    });
+    return amapSdkPromise;
+  }
+
+  async function ensureAmapMap() {
+    const AMap = await loadAmapSdk();
+    if (amapMap) return { AMap, map: amapMap };
+    if (!$routePreview) throw new Error('地图容器不存在');
+    $routePreview.textContent = '';
+    $routePreview.classList.add('amap-ready');
+    amapMap = new AMap.Map($routePreview, {
+      viewMode: '2D',
+      resizeEnable: true,
+      zoom: 16,
+      mapStyle: 'amap://styles/normal',
+      showLabel: true,
+      layers: [new AMap.TileLayer({ visible: true, zIndex: 1, opacity: 1 })],
+      features: ['bg', 'road', 'building', 'point']
+    });
+    amapMap.setFeatures(['bg', 'road', 'building', 'point']);
+    amapMap.addControl(new AMap.Scale());
+    amapMap.addControl(new AMap.ToolBar({ position: { right: '10px', top: '10px' } }));
+    return { AMap, map: amapMap };
+  }
+
+  function createAmapMarker(AMap, point, color, label) {
+    return new AMap.Marker({
+      position: toAmapLngLat(point),
+      anchor: 'center',
+      content: `<div class="amap-pin" style="width:14px;height:14px;border-radius:50%;background:${color};border:3px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.28);"></div>`,
+      title: label
+    });
+  }
+
+  function updateAmapMarkers(AMap, map, points, position) {
+    const startPoint = points.find(validPoint);
+    const endPoint = [...points].reverse().find(validPoint);
+    const currentPoint = validPoint(position) ? position : null;
+
+    if (amapStartMarker) map.remove(amapStartMarker);
+    if (amapEndMarker) map.remove(amapEndMarker);
+    if (amapCurrentMarker) map.remove(amapCurrentMarker);
+
+    amapStartMarker = startPoint ? createAmapMarker(AMap, startPoint, '#4A7C59', '起点') : null;
+    amapEndMarker = endPoint ? createAmapMarker(AMap, endPoint, '#C5453A', '目的地') : null;
+    amapCurrentMarker = currentPoint ? createAmapMarker(AMap, currentPoint, '#2563eb', '当前位置') : null;
+
+    [amapStartMarker, amapEndMarker, amapCurrentMarker].filter(Boolean).forEach(marker => map.add(marker));
+  }
+
+  async function renderAmapPreview(points, position, history, fallback) {
+    const seq = ++amapRenderSeq;
+    if ($routePreview && !amapMap) {
+      resetRoutePreviewClass();
+      $routePreview.textContent = '正在加载高德地图...';
+    }
+    try {
+      const { AMap, map } = await ensureAmapMap();
+      if (seq !== amapRenderSeq) return;
+      const routePath = getValidPath(points);
+      const hasRoute = routePath.length >= 2;
+      const trackPath = hasRoute ? getValidPath(history) : [];
+      if (amapRouteLine) map.remove(amapRouteLine);
+      if (amapTrackLine) map.remove(amapTrackLine);
+
+      amapRouteLine = hasRoute ? new AMap.Polyline({
+        path: routePath,
+        strokeColor: '#e85d04',
+        strokeWeight: 7,
+        strokeOpacity: 0.95,
+        lineJoin: 'round',
+        lineCap: 'round',
+        showDir: true
+      }) : null;
+      amapTrackLine = trackPath.length >= 2 ? new AMap.Polyline({
+        path: trackPath,
+        strokeColor: '#2563eb',
+        strokeWeight: 4,
+        strokeOpacity: 0.7,
+        strokeStyle: 'dashed',
+        lineJoin: 'round',
+        lineCap: 'round'
+      }) : null;
+
+      [amapRouteLine, amapTrackLine].filter(Boolean).forEach(line => map.add(line));
+      updateAmapMarkers(AMap, map, points, position);
+
+      const fitItems = [amapRouteLine, amapTrackLine, amapStartMarker, amapEndMarker, amapCurrentMarker].filter(Boolean);
+      if (hasRoute && fitItems.length) map.setFitView(fitItems, false, [36, 36, 36, 36]);
+      else if (validPoint(position)) map.setZoomAndCenter(17, toAmapLngLat(position));
+    } catch (e) {
+      console.warn('[Navigation] 高德地图不可用:', e);
+      amapMap = null;
+      showMapNotice(e.message || '高德地图加载失败');
+    }
+  }
+
   function buildProjector(points, width, height, padding) {
     const validPoints = points.filter(validPoint);
     const lons = validPoints.map(p => Number(p.lon));
@@ -287,9 +433,26 @@ document.addEventListener('click', function _unlockAudio() {
   function drawRoutePreview(points, position, history) {
     if (!$routePreview) return;
     if (!points || points.length < 2) {
+      resetRoutePreviewClass();
       $routePreview.textContent = '路线信息将在定位和规划完成后显示';
       return;
     }
+
+    if (clientConfig.amapJsApiKey) {
+      renderAmapPreview(points, position, history, () => drawSvgRoutePreview(points, position, history));
+      return;
+    }
+
+    if (!clientConfig.amapJsApiKeyConfigured) {
+      showMapNotice('缺少 AMAP_JS_API_KEY，请配置高德 Web端(JS API) Key 后重启后端');
+      return;
+    }
+
+    drawSvgRoutePreview(points, position, history);
+  }
+
+  function drawSvgRoutePreview(points, position, history) {
+    resetRoutePreviewClass();
 
     const width = Math.max(320, $routePreview.clientWidth || 520);
     const height = Math.max(220, $routePreview.clientHeight || 260);
@@ -324,9 +487,27 @@ document.addEventListener('click', function _unlockAudio() {
   function drawLocationPreview(position, history) {
     if (!$routePreview) return;
     if (!position) {
+      resetRoutePreviewClass();
       $routePreview.textContent = '路线信息将在定位和规划完成后显示';
       return;
     }
+
+    if (clientConfig.amapJsApiKey) {
+      renderAmapPreview([], position, [], () => drawSvgLocationPreview(position, []));
+      return;
+    }
+
+    if (!clientConfig.amapJsApiKeyConfigured) {
+      showMapNotice('缺少 AMAP_JS_API_KEY，请配置高德 Web端(JS API) Key 后重启后端');
+      return;
+    }
+
+    drawSvgLocationPreview(position, []);
+  }
+
+  function drawSvgLocationPreview(position, history) {
+    resetRoutePreviewClass();
+
     const width = Math.max(320, $routePreview.clientWidth || 520);
     const height = Math.max(220, $routePreview.clientHeight || 260);
     const padding = 32;
@@ -534,6 +715,9 @@ document.addEventListener('click', function _unlockAudio() {
       const cfg = await r.json();
       pcMicEnabled = !!cfg.pc_mic_auto_start;
       pcTtsPlaybackEnabled = !!cfg.pc_tts_playback_enabled;
+      clientConfig.amapJsApiKey = cfg.amap_js_api_key || '';
+      clientConfig.amapJsApiKeyConfigured = !!cfg.amap_js_api_key_configured;
+      clientConfig.amapSecurityJsCode = cfg.amap_security_js_code || '';
     } catch (e) {
       console.warn('[Config] 加载失败，使用默认值(麦克风关/TTS关):', e);
     }

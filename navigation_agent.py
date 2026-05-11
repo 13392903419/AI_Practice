@@ -244,10 +244,26 @@ class NavigationAgent:
         if local_started:
             print(f"[NAV-AGENT] local blindpath navigation started for: {destination_text}", flush=True)
 
+        self._reset_position_history()
+
         async with self._session_lock:
             session = _NavSession(plan=plan)
             session.task = asyncio.create_task(self._run_live(session))
             self._session = session
+
+    def _reset_position_history(self) -> None:
+        self._position_history.clear()
+        if self._current_pos is None:
+            return
+        self._position_history.append(
+            {
+                "lon": self._current_pos[0],
+                "lat": self._current_pos[1],
+                "accuracy": self._pos_accuracy,
+                "provider": self._pos_provider,
+                "ts": self._pos_ts or time.time(),
+            }
+        )
 
     async def _run_live(self, session: _NavSession) -> None:
         try:
@@ -280,6 +296,9 @@ class NavigationAgent:
     # ---------- 取消导航 ----------
     async def _cancel_navigation(self, reason: str = "", silent: bool = False) -> None:
         stopped_local_modes = await self._run_global_stop_handler(reason or "cancel_navigation")
+        if not silent:
+            self._last_plan = None
+            self._last_destination_text = ""
         async with self._session_lock:
             session = self._session
             self._session = None
@@ -342,12 +361,12 @@ class NavigationAgent:
 
     def get_status(self) -> Dict[str, Any]:
         session = self._session
-        plan = session.plan if session else self._last_plan
+        plan = session.plan if session else None
         elapsed_s = int(time.time() - session.started_at) if session else 0
         position_age_s = int(time.time() - self._pos_ts) if self._current_pos else None
         return {
             "active": session is not None,
-            "destination_text": plan.destination_text if plan else self._last_destination_text,
+            "destination_text": plan.destination_text if plan else "",
             "error": self._last_error,
             "elapsed_s": elapsed_s,
             "position": {

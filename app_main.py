@@ -71,6 +71,8 @@ PC_TTS_PLAYBACK_ENABLED = _env_bool("PC_TTS_PLAYBACK_ENABLED", False)
 STARTUP_ENABLE_AUDIO_TESTS = _env_bool("STARTUP_ENABLE_AUDIO_TESTS", False)
 STARTUP_PRELOAD_MODELS = _env_bool("STARTUP_PRELOAD_MODELS", True)
 USE_LOCAL_QWEN = _env_bool("USE_LOCAL_QWEN", False)
+AMAP_JS_API_KEY = os.getenv("AMAP_JS_API_KEY", "").strip()
+AMAP_SECURITY_JS_CODE = os.getenv("AMAP_SECURITY_JS_CODE", "").strip()
 
 
 def _source_allowed(stream_kind: str, source: str) -> bool:
@@ -926,6 +928,9 @@ def client_config():
         "pc_mic_auto_start": PC_MIC_AUTO_START,
         "pc_tts_playback_enabled": PC_TTS_PLAYBACK_ENABLED,
         "mobile_text_tts_only": MOBILE_TEXT_TTS_ONLY,
+        "amap_js_api_key": AMAP_JS_API_KEY,
+        "amap_js_api_key_configured": bool(AMAP_JS_API_KEY),
+        "amap_security_js_code": AMAP_SECURITY_JS_CODE,
     }
 
 

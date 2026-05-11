@@ -21,38 +21,60 @@ def _get_executor():
     return _executor
 
 
+# 超时与重试配置（可由环境变量覆盖）
+_EDGE_TTS_CONNECT_TIMEOUT = int(os.getenv("EDGE_TTS_CONNECT_TIMEOUT", "30"))   # WSS 连接超时（秒）
+_EDGE_TTS_RECEIVE_TIMEOUT = int(os.getenv("EDGE_TTS_RECEIVE_TIMEOUT", "120"))  # 音频接收超时（秒）
+_EDGE_TTS_MAX_RETRIES     = int(os.getenv("EDGE_TTS_MAX_RETRIES", "3"))        # 失败重试次数
+_EDGE_TTS_RETRY_BACKOFF   = float(os.getenv("EDGE_TTS_RETRY_BACKOFF", "1.5"))  # 重试退避基数（秒）
+
+
 def _synthesize_edge_tts_sync(text: str, voice: str = "zh-CN-XiaoxiaoNeural") -> bytes:
     """
-    同步调用 Edge-TTS（在线程池中运行）
+    同步调用 Edge-TTS（在线程池中运行），带超时配置 + 失败重试
     :param text: 要合成的文本
     :param voice: 语音名称
     :return: PCM 16bit 音频数据（24kHz）
     """
     import edge_tts
     import tempfile
+    import time as _time
 
-    try:
-        # 创建通信对象
-        communicate = edge_tts.Communicate(
-            text=text,
-            voice=voice,
-            rate='+0%',  # 语速
-            volume='+0%'  # 音量
-        )
+    last_err: Optional[Exception] = None
+    for attempt in range(1, _EDGE_TTS_MAX_RETRIES + 1):
+        tmp_path: Optional[str] = None
+        try:
+            communicate = edge_tts.Communicate(
+                text=text,
+                voice=voice,
+                rate='+0%',
+                volume='+0%',
+                connect_timeout=_EDGE_TTS_CONNECT_TIMEOUT,
+                receive_timeout=_EDGE_TTS_RECEIVE_TIMEOUT,
+            )
 
-        # 保存到临时文件
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_file:
-            tmp_path = tmp_file.name
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_file:
+                tmp_path = tmp_file.name
 
-        # 异步保存（需要运行事件循环）
-        asyncio.run(communicate.save(tmp_path))
+            # 异步保存（在新事件循环里跑）
+            asyncio.run(communicate.save(tmp_path))
 
-        # 读取 MP3 并转换为 PCM
-        return _convert_mp3_to_pcm(tmp_path)
+            return _convert_mp3_to_pcm(tmp_path)
 
-    except Exception as e:
-        print(f"[EDGE-TTS] 合成失败: {e}")
-        raise
+        except Exception as e:
+            last_err = e
+            print(f"[EDGE-TTS] 合成失败 (尝试 {attempt}/{_EDGE_TTS_MAX_RETRIES}): {e}", flush=True)
+            # 清理失败时遗留的临时文件
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+            if attempt < _EDGE_TTS_MAX_RETRIES:
+                sleep_s = _EDGE_TTS_RETRY_BACKOFF * attempt
+                _time.sleep(sleep_s)
+
+    # 全部重试失败
+    raise last_err if last_err else RuntimeError("Edge-TTS 合成失败：未知错误")
 
 
 def _convert_mp3_to_pcm(mp3_path: str) -> bytes:

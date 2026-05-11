@@ -259,6 +259,8 @@ pip install -r requirements.txt
 ```env
 DASHSCOPE_API_KEY=your_dashscope_api_key
 AMAP_API_KEY=your_amap_web_service_key
+AMAP_JS_API_KEY=your_amap_js_api_key
+AMAP_SECURITY_JS_CODE=
 AMAP_PROVIDER=rest
 AMAP_HTTP_TIMEOUT=5.0
 
@@ -303,6 +305,8 @@ HAND_TASK_PATH=model/hand_landmarker.task
 - STARTUP_PRELOAD_MODELS：启动时是否预加载模型。
 - USE_LOCAL_QWEN：是否启用本地 Qwen2-VL。
 - AMAP_API_KEY：高德地图 Web 服务 Key，用于地址解析和步行路线规划。
+- AMAP_JS_API_KEY：高德地图 Web端(JS API) Key，用于浏览器前端显示真实地图底图、道路和地点名；它和 AMAP_API_KEY 的 Web 服务 Key 是两类权限，建议在高德控制台单独创建或确认已开通 JS API 服务。
+- AMAP_SECURITY_JS_CODE：如果高德控制台为 JS API Key 开启了安全密钥校验，在这里填写安全密钥。
 - VOICEPRINT_ENABLED：是否启用声纹门控。
 - VOICEPRINT_DEBUG_ONLY：是否只打印声纹分数而不拦截命令。
 - VOICEPRINT_THRESHOLD：声纹相似度阈值，开发测试可先用 0.70。
