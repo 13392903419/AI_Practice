@@ -24,6 +24,7 @@ RECOVERY = "RECOVERY"                  # 兜底/恢复（感知暂时丢失时�
 TRAFFIC_LIGHT_DETECTION = "TRAFFIC_LIGHT_DETECTION"  # 红绿灯检测模式
 ITEM_SEARCH = "ITEM_SEARCH"            # 找物品模式（暂停导航，由yolomedia处理画面）
 CROSSING_END_GUIDANCE = "过马路结束，准备上人行道。"
+CROSSWALK_ARRIVAL_TEXT = "斑马线到了可以过马路"
 
 # ========== 返回结构 ==========
 @dataclass
@@ -278,11 +279,18 @@ class NavigationMaster:
         self.FRAMES_CROSS_END = 12
         self.FRAMES_NEXT_BLIND_OK = 8
         self.FRAMES_LOST_MAX = 45
+        self.FRAMES_AUTO_CROSSWALK_LOST = 18
 
         self.ANGLE_ALIGN_THR_DEG = 12.0
         self.OFFSET_ALIGN_THR = 0.15
 
         self.COOLDOWN_SEC = 0.6
+        self.CROSSWALK_AUTO_SWITCH_DELAY_SEC = 1.8
+
+        self.crosswalk_auto_switch_at = 0.0
+        self.crosswalk_auto_switch_armed = False
+        self.auto_crossing_started_by_crosswalk = False
+        self.cnt_auto_crossing_no_crosswalk = 0
         
         # 找物品状态管理
         self.prev_nav_state_before_search = None  # 找物品前的导航状态，用于恢复
@@ -293,6 +301,7 @@ class NavigationMaster:
     
     def start_blind_path_navigation(self):
         """启动盲道导航模式"""
+        self._clear_crosswalk_auto_switch()
         self.state = BLINDPATH_NAV
         self.cooldown_until = time.time() + self.COOLDOWN_SEC
         if self.blind:
@@ -300,6 +309,7 @@ class NavigationMaster:
     
     def stop_navigation(self):
         """停止导航，回到对话模式"""
+        self._clear_crosswalk_auto_switch()
         self.state = CHAT
         self.cooldown_until = time.time() + self.COOLDOWN_SEC
         if self.blind:
@@ -307,6 +317,7 @@ class NavigationMaster:
     
     def start_crossing(self):
         """启动过马路模式"""
+        self._clear_crosswalk_auto_switch()
         self.state = CROSSING
         self.cooldown_until = time.time() + self.COOLDOWN_SEC
         if self.cross:
@@ -369,6 +380,7 @@ class NavigationMaster:
 
     def reset(self):
         self.state = IDLE
+        self._clear_crosswalk_auto_switch()
         self.cnt_crosswalk_seen = 0
         self.cnt_align_ready = 0
         self.cnt_cross_end = 0
@@ -396,11 +408,35 @@ class NavigationMaster:
         return ""
 
     def _switch_to_blindpath_after_crossing(self, now: float):
+        self._clear_crosswalk_auto_switch()
         self.state = BLINDPATH_NAV
         self.cooldown_until = now + self.COOLDOWN_SEC
         self.cnt_cross_end = 0
         try:
             self.blind.reset()
+        except Exception:
+            pass
+
+    def _clear_crosswalk_auto_switch(self):
+        self.crosswalk_auto_switch_at = 0.0
+        self.crosswalk_auto_switch_armed = False
+        self.auto_crossing_started_by_crosswalk = False
+        self.cnt_auto_crossing_no_crosswalk = 0
+
+    def _arm_crosswalk_auto_switch(self, now: float):
+        self.crosswalk_auto_switch_at = now + self.CROSSWALK_AUTO_SWITCH_DELAY_SEC
+        self.crosswalk_auto_switch_armed = True
+        self.cnt_auto_crossing_no_crosswalk = 0
+
+    def _switch_to_crossing_after_crosswalk_arrival(self, now: float):
+        self.state = CROSSING
+        self.cooldown_until = now + self.COOLDOWN_SEC
+        self.crosswalk_auto_switch_at = 0.0
+        self.crosswalk_auto_switch_armed = False
+        self.auto_crossing_started_by_crosswalk = True
+        self.cnt_auto_crossing_no_crosswalk = 0
+        try:
+            self.cross.reset()
         except Exception:
             pass
         try:
@@ -490,6 +526,25 @@ class NavigationMaster:
             state_info = bres.state_info or {}
             cross_stage = state_info.get("crosswalk_stage", "not_detected")
             blind_state = state_info.get("state", "UNKNOWN")
+            crosswalk_active = bool(state_info.get("crosswalk_active", False))
+            crosswalk_arrival_active = float(state_info.get("crosswalk_area_ratio", 0.0) or 0.0) >= 0.12
+            if state_info.get("crosswalk_auto_switch_requested"):
+                self._arm_crosswalk_auto_switch(now)
+            elif self.crosswalk_auto_switch_armed and not crosswalk_arrival_active:
+                self.crosswalk_auto_switch_armed = False
+                self.crosswalk_auto_switch_at = 0.0
+
+            if self.crosswalk_auto_switch_armed and now >= self.crosswalk_auto_switch_at and not in_cooldown:
+                if crosswalk_arrival_active or crosswalk_active:
+                    self._switch_to_crossing_after_crosswalk_arrival(now)
+                    return OrchestratorResult(
+                        ann,
+                        self._say(now, ""),
+                        self.state,
+                        {"source": "blind", "auto_switch": "crosswalk_arrival"}
+                    )
+                self.crosswalk_auto_switch_armed = False
+                self.crosswalk_auto_switch_at = 0.0
             # 可选字段（若工作流未来补充）
             angle = float(state_info.get("last_angle", 0.0))
             center_x_ratio = float(state_info.get("last_center_x_ratio", 0.5))
@@ -614,6 +669,21 @@ class NavigationMaster:
 
             ann = cres.annotated_image if cres.annotated_image is not None else bgr.copy()
             say = cres.guidance_text or ""
+
+            if self.auto_crossing_started_by_crosswalk:
+                if getattr(cres, "crosswalk_detected", False):
+                    self.cnt_auto_crossing_no_crosswalk = 0
+                else:
+                    self.cnt_auto_crossing_no_crosswalk += 1
+
+                if self.cnt_auto_crossing_no_crosswalk >= self.FRAMES_AUTO_CROSSWALK_LOST and not in_cooldown:
+                    self._switch_to_blindpath_after_crossing(now)
+                    return OrchestratorResult(
+                        ann,
+                        self._say(now, ""),
+                        self.state,
+                        {"source": "cross", "auto_switch": "crosswalk_lost"}
+                    )
 
             if say == CROSSING_END_GUIDANCE:
                 self._switch_to_blindpath_after_crossing(now)

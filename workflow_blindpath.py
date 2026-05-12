@@ -81,6 +81,7 @@ LATERAL_FLOW_MAX_DY_PX = float(os.getenv("BLINDPATH_LATERAL_FLOW_MAX_DY_PX", "5.
 LATERAL_FLOW_MAX_DY_RATIO = float(os.getenv("BLINDPATH_LATERAL_FLOW_MAX_DY_RATIO", "0.006"))
 LATERAL_APPROACH_AREA_GROWTH = float(os.getenv("BLINDPATH_LATERAL_APPROACH_AREA_GROWTH", "0.015"))
 LATERAL_APPROACH_BOTTOM_GROWTH = float(os.getenv("BLINDPATH_LATERAL_APPROACH_BOTTOM_GROWTH", "0.03"))
+CROSSWALK_ARRIVAL_TEXT = "斑马线到了可以过马路"
 
 @dataclass
 class ProcessingResult:
@@ -619,6 +620,7 @@ class BlindPathNavigator:
             self._add_obstacle_visualization(obs, frame_visualizations)
         
         crosswalk_active = False
+        crosswalk_area_ratio = 0.0
         if crosswalk_mask is not None and crosswalk_mask.size > 0:
             crosswalk_area_ratio = float(np.sum(crosswalk_mask > 0) / crosswalk_mask.size)
             crosswalk_active = crosswalk_area_ratio >= self.crosswalk_monitor.THRESHOLDS['discover']
@@ -802,6 +804,7 @@ class BlindPathNavigator:
         
         # 收集所有可能的语音指令
         voice_candidates = []
+        crosswalk_auto_switch_requested = False
         
         # 1. 添加主要导航语音
         if guidance_text:
@@ -954,6 +957,12 @@ class BlindPathNavigator:
                         play_voice_text(final_guidance_text)
                         logger.info(f"[语音播报] 优先级{selected_voice['priority']}: {final_guidance_text}")
 
+                    if (
+                        selected_voice.get('source') == 'crosswalk'
+                        and final_guidance_text.strip() == CROSSWALK_ARRIVAL_TEXT
+                    ):
+                        crosswalk_auto_switch_requested = True
+
                     # 障碍物语音在成功发起播报后再清空，避免被其他语音挤掉
                     if selected_voice.get('source') == 'obstacle':
                         self.pending_obstacle_voice = None
@@ -988,6 +997,9 @@ class BlindPathNavigator:
             state_info={
                 "state": self.current_state,
                 "crosswalk_stage": current_stage,
+                "crosswalk_active": crosswalk_active,
+                "crosswalk_area_ratio": crosswalk_area_ratio,
+                "crosswalk_auto_switch_requested": crosswalk_auto_switch_requested,
                 "frame_count": self.frame_counter
             }
         )

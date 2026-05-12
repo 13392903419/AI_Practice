@@ -124,6 +124,8 @@ class CrossStreetResult:
     guidance_text: str = ""
     visualizations: List[Dict[str, Any]] = None
     should_switch_to_blindpath: bool = False
+    crosswalk_detected: bool = False
+    cross_state: str = ""
 
     def __post_init__(self):
         if self.visualizations is None:
@@ -1905,7 +1907,9 @@ class CrossStreetNavigator:
                 annotated_image=annotated,
                 guidance_text=guidance_text,
                 visualizations=frame_visualizations,
-                should_switch_to_blindpath=(guidance_text == CROSSING_END_GUIDANCE)
+                should_switch_to_blindpath=(guidance_text == CROSSING_END_GUIDANCE),
+                crosswalk_detected=(crosswalk_mask is not None),
+                cross_state=self.state
             )
 
         except Exception as e:
@@ -1914,7 +1918,9 @@ class CrossStreetNavigator:
                 annotated_image=bgr_image,
                 guidance_text="",
                 visualizations=[],
-                should_switch_to_blindpath=False
+                should_switch_to_blindpath=False,
+                crosswalk_detected=False,
+                cross_state=self.state
             )
 
 class YOLOModelWrapper:
