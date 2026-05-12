@@ -36,6 +36,7 @@
 - 用户说“停止导航”或“取消导航”时，会统一停止目的地导航和本地盲道导航。
 - ASR final 文本进入导航 Agent 前会经过声纹门控，降低系统 TTS 回采后误触发命令的概率。
 - 停止/取消导航等紧急控制词会优先放行，避免关键时刻无法停止导航。
+- 过马路阶段优化了斑马线语音引导：连续相同方向不重复播报，方向变化时立即提示，便于用户及时回正。
 
 面向队友的详细本地部署、声纹录入和测试流程见 [docs/team-testing-guide.md](docs/team-testing-guide.md)。
 
@@ -52,6 +53,9 @@
 
 - 检测斑马线位置与方向
 - 引导用户逐步对齐斑马线
+- 进入过马路后，斑马线面积足够大时提示“保持直行”
+- 过马路过程中连续相同方向不重复播报；从“保持直行”变为“向左移/向右移”，或回到“保持直行”时会立即播报
+- 当斑马线面积低于阈值时，根据斑马线位于画面左侧或右侧提示用户向左移或向右移
 - 检测红绿灯状态
 - 过街后尝试回归对侧盲道
 
@@ -265,6 +269,7 @@ AMAP_PROVIDER=rest
 AMAP_HTTP_TIMEOUT=5.0
 PHONE_HEADING_OFFSET_DEG=90
 PHONE_HEADING_MAX_AGE_SEC=10
+CROSSING_ON_AREA_RATIO=0.08
 
 RUNTIME_MODE=phone_priority
 ACTIVE_VIDEO_SOURCE=phone
@@ -311,6 +316,7 @@ HAND_TASK_PATH=model/hand_landmarker.task
 - AMAP_SECURITY_JS_CODE：如果高德控制台为 JS API Key 开启了安全密钥校验，在这里填写安全密钥。
 - PHONE_HEADING_OFFSET_DEG：手机横向胸前手持时的朝向映射偏移，默认 90，表示用户朝向 = 手机指南针原始朝向 + 90°。
 - PHONE_HEADING_MAX_AGE_SEC：手机朝向数据有效期，超过后导航播报会回退到高德原始方向文本。
+- CROSSING_ON_AREA_RATIO：过马路阶段判断用户是否仍在斑马线范围内的面积占比阈值，默认 0.08；低于该值时会按斑马线左右位置提示“向左移”或“向右移”。
 - VOICEPRINT_ENABLED：是否启用声纹门控。
 - VOICEPRINT_DEBUG_ONLY：是否只打印声纹分数而不拦截命令。
 - VOICEPRINT_THRESHOLD：声纹相似度阈值，开发测试可先用 0.70。
