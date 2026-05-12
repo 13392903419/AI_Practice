@@ -112,6 +112,7 @@ ITEM_TO_CLASS_MAP = {
 # 英文类别名到中文的映射
 _OBSTACLE_NAME_CN = {
     'person': '人',
+    'pedestrian': '人',
     'bicycle': '自行车',
     'car': '车',
     'motorcycle': '摩托车',
@@ -124,7 +125,7 @@ _OBSTACLE_NAME_CN = {
 }
 
 # 动态类别名称列表
-DYNAMIC_CLASS_NAMES = {'person', 'bicycle', 'car', 'motorcycle', 'bus', 'truck', 'animal', 'dog'}
+DYNAMIC_CLASS_NAMES = {'person', 'pedestrian', 'bicycle', 'car', 'motorcycle', 'bus', 'truck', 'animal', 'dog'}
 
 def extract_english_label(item_cn: str) -> tuple:
     """

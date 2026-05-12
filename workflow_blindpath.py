@@ -58,6 +58,7 @@ VIS_COLORS = {
 # 障碍物名称映射
 _OBSTACLE_NAME_CN = {
     'person': '人',
+    'pedestrian': '人',
     'bicycle': '自行车',
     'car': '车',
     'motorcycle': '摩托车',
@@ -70,7 +71,7 @@ _OBSTACLE_NAME_CN = {
 }
 
 # 动态类别名称列表
-DYNAMIC_CLASS_NAMES = {'person', 'bicycle', 'car', 'motorcycle', 'bus', 'truck', 'animal', 'dog'}
+DYNAMIC_CLASS_NAMES = {'person', 'pedestrian', 'bicycle', 'car', 'motorcycle', 'bus', 'truck', 'animal', 'dog'}
 
 # 横向快速车流过滤参数（用于减少等待/通行时的语音干扰）
 LATERAL_FLOW_MIN_PX = float(os.getenv("BLINDPATH_LATERAL_FLOW_MIN_PX", "7.0"))
@@ -2864,7 +2865,7 @@ class BlindPathNavigator:
         k = (name or '').strip().lower()
         # 物体名（中文）
         obj_map = {
-            'person': '人', 'car': '车', 'bicycle': '自行车', 'motorcycle': '摩托车',
+            'person': '人', 'pedestrian': '人', 'car': '车', 'bicycle': '自行车', 'motorcycle': '摩托车',
             'bus': '公交车', 'truck': '卡车', 'scooter': '电瓶车', 'stroller': '电瓶车',
             'dog': '狗', 'animal': '动物',
         }
@@ -3663,20 +3664,6 @@ class BlindPathNavigator:
             return
         image[mask > 0] = 0
   
-    def _speech_for_obstacle(self, name: str) -> str:
-        k = (name or '').strip().lower()
-        if k == 'person': return "前方有人，注意避让。"
-        if k == 'car': return "前方有车，注意避让。"
-        if k == 'bicycle': return "前方有自行车，停一下。"
-        if k == 'motorcycle': return "前方有摩托车，停一下。"
-        if k == 'bus': return "前方有公交车，停一下。"
-        if k == 'truck': return "前方有卡车，停一下。"
-        if k == 'scooter': return "前方有电瓶车，停一下。"
-        if k == 'stroller': return "前方有电瓶车，停一下。"
-        if k == 'dog': return "前方有狗，停一下。"
-        if k == 'animal': return "前方有动物，停一下。"
-        return "前方有障碍物，注意避让。"
-
     def _update_obstacle_properties(self, obs, H, W):
         """更新障碍物的派生属性"""
         if 'mask' not in obs or obs['mask'] is None:

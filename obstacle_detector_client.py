@@ -51,6 +51,7 @@ class ObstacleDetectorClient:
         self.model = None
         self.whitelist_embeddings = None
         self.WHITELIST_CLASSES = [
+            'person', 'pedestrian',
             'bicycle', 'car', 'motorcycle', 'bus', 'truck', 'animal', 'scooter', 'stroller', 'dog',
             'pole', 'post', 'column', 'pillar', 'stanchion', 'bollard', 'utility pole',
             'telegraph pole', 'light pole', 'street pole', 'signpost', 'support post',
