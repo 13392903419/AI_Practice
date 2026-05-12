@@ -38,6 +38,7 @@ MUSIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music")
 
 # 音频文件映射（从 voice/map.zh-CN.json 动态加载）
 AUDIO_MAP = {}
+SILENT_AUDIO_KEYS = set()
 
 # TTS 配置
 USE_TTS_FOR_UNKNOWN = True  # 对于未知的语音，使用 TTS 合成
@@ -159,9 +160,12 @@ def _merge_voice_map():
             m = json.load(f)
 
         added = 0
+        silent = 0
         for text, info in (m or {}).items():
             files = (info or {}).get("files") or []
             if not files:
+                SILENT_AUDIO_KEYS.add(text)
+                silent += 1
                 continue
             fname = files[0]
 
@@ -177,7 +181,7 @@ def _merge_voice_map():
             else:
                 print(f"[AUDIO] 映射文件缺失: {fpath}")
 
-        print(f"[AUDIO] 已加载 voice 映射 {added} 条")
+        print(f"[AUDIO] 已加载 voice 映射 {added} 条，静音映射 {silent} 条")
 
         # 扫描 music 目录，自动添加简短指令（向左、向右、向前等）
         if os.path.exists(MUSIC_DIR):
@@ -670,6 +674,8 @@ def play_voice_text(text: str, generation_id=None, priority: int = None, source:
 
     # 逐一尝试匹配
     for ck in candidates:
+        if ck in SILENT_AUDIO_KEYS:
+            return
         if ck in AUDIO_MAP:
             play_audio_threadsafe(ck, critical=is_critical)
             return
