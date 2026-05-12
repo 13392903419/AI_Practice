@@ -63,8 +63,8 @@ CROSSWALK_NEAR_BOTTOM_RATIO = 0.80  # 斑马线底部超过画面80%认为"很�
 CROSSWALK_NEAR_MIN_HEIGHT_RATIO = 0.35  # 斑马线高度占画面35%以上（新增条件）
 
 # 过马路中"是否仍在斑马线上"的面积阈值
-# 面积 >= 此阈值：认为还在斑马线上，提示向前
-# 面积 <  此阈值：认为偏离了斑马线，根据斑马线在画面的左/右来提示平移
+# 面积 >= 此阈值：认为还在斑马线上，提示保持直行
+# 面积 <  此阈值：认为偏离了斑马线，根据斑马线在画面的左/右来提示移动
 CROSSING_ON_AREA_RATIO = float(os.getenv('CROSSING_ON_AREA_RATIO', '0.08'))
 
 # 红绿灯判定参数
@@ -233,6 +233,7 @@ class CrossStreetNavigator:
         self.crossing_end_announced = False  # 是否已播报"过马路结束"（CROSSING状态用）
         self.last_crosswalk_seen_time = 0    # 上次检测到斑马线的时间
         self.last_blindpath_announce_time = 0  # 上次播报盲道提示的时间（用于节流重复播报）
+        self.last_crossing_direction = ""    # 上一次过马路方向提示（连续相同提示不重复播）
 
         # —— 时序/追踪状态 ——
         self.prev_mask = None            # 上一帧稳定后的二值掩码
@@ -302,6 +303,7 @@ class CrossStreetNavigator:
         self.crossing_end_announced = False
         self.last_crosswalk_seen_time = 0
         self.last_blindpath_announce_time = 0
+        self.last_crossing_direction = ""
         # 追踪
         self.prev_mask = None
         self.prev_mask_float = None
@@ -1543,7 +1545,7 @@ class CrossStreetNavigator:
                         if abs(angle) >= SEEKING_ANGLE_THRESH_DEG:
                             direction = "左转一点" if angle > 0 else "右转一点"
                         elif abs(offset) >= SEEKING_OFFSET_THRESH:
-                            direction = "向右平移" if offset > 0 else "向左平移"
+                            direction = "向右移" if offset > 0 else "向左移"
                         else:
                             direction = "保持直行"
                         
@@ -1616,6 +1618,7 @@ class CrossStreetNavigator:
                                     self.crossing_end_announced = False      # 重置过马路结束标志
                                     self.last_crosswalk_seen_time = current_time  # 初始化斑马线检测时间
                                     self.last_blindpath_announce_time = 0    # 重置盲道播报时间
+                                    self.last_crossing_direction = ""        # 重置过马路方向去重状态
                                 else:
                                     # 检测到绿灯但还不稳定，节流播报
                                     if current_time - self.last_waiting_light_time > 3.0:
@@ -1669,6 +1672,7 @@ class CrossStreetNavigator:
                         self.crossing_end_announced = False          # 重置过马路结束标志
                         self.last_crosswalk_seen_time = current_time # 初始化斑马线检测时间
                         self.last_blindpath_announce_time = 0        # 重置盲道播报时间
+                        self.last_crossing_direction = ""            # 重置过马路方向去重状态
             
             elif self.state == STATE_CROSSING:
                 # 阶段3：过马路引导（原有逻辑）
@@ -1777,19 +1781,19 @@ class CrossStreetNavigator:
                             # 兜底：若计算异常，保持原 offset（默认为0）
                             pass
 
-                    # 导航方向（简化版：不再时刻对中，只要人还在斑马线上即可）
-                    # - 面积 >= 阈值：仍在斑马线上，提示向前
-                    # - 面积  < 阈值：偏离斑马线，根据斑马线中心在画面的位置提示平移
+                    # 导航方向（简化版：不再时刻对中，只在方向文本变化时播报）
+                    # - 面积 >= 阈值：仍在斑马线上，提示保持直行
+                    # - 面积  < 阈值：偏离斑马线，根据斑马线中心在画面的位置提示移动
                     if area_ratio >= CROSSING_ON_AREA_RATIO:
                         direction = "保持直行"
                     else:
                         ys_cw, xs_cw = np.where(crosswalk_mask > 0)
                         if xs_cw.size > 0:
                             cw_center_x_ratio = float(xs_cw.mean()) / float(w)
-                            # 斑马线偏左 → 用户偏右了 → 向左平移回来；反之同理
-                            direction = "向左平移" if cw_center_x_ratio < 0.5 else "向右平移"
+                            # 斑马线偏左表示用户偏右，需要向左移回斑马线；反之同理
+                            direction = "向左移" if cw_center_x_ratio < 0.5 else "向右移"
                         else:
-                            direction = "保持直行"
+                            direction = ""
 
                     # 障碍物引导优先级（近距离优先覆盖方向提示）
                     obstacle_override = None
@@ -1812,7 +1816,8 @@ class CrossStreetNavigator:
                     # 稍后会统一添加完整的数据面板
 
                     # 语音输出（节流）
-                    if current_time - self.last_guide_time > self.guide_interval:
+                    direction_changed = bool(direction and direction != self.last_crossing_direction)
+                    if current_time - self.last_guide_time > self.guide_interval or direction_changed:
                         # 检查是否快走完斑马线
                         is_almost_done = self._is_crosswalk_almost_done(crosswalk_mask, h, w)
                         
@@ -1843,8 +1848,9 @@ class CrossStreetNavigator:
                             guidance_text = obstacle_override
                             self.last_guide_time = current_time
                         # 优先级5：方向引导
-                        else:
+                        elif direction and direction_changed:
                             guidance_text = direction
+                            self.last_crossing_direction = direction
                             self.last_guide_time = current_time
                 else:
                     # CROSSING 阶段但没有检测到斑马线
